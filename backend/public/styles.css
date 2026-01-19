@@ -90,6 +90,69 @@ header h1 {
   text-transform: uppercase;
 }
 
+.bingo-panel {
+  background: var(--header-bg);
+  border-radius: 12px;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.bingo-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.bingo-label {
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  opacity: 0.8;
+}
+
+.bingo-input {
+  background: var(--cell-bg);
+  border: 1px solid var(--cell-border);
+  color: inherit;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.bingo-input:focus {
+  outline: 2px solid var(--called-color);
+  outline-offset: 0;
+}
+
+.bingo-button {
+  background: var(--daub-color);
+  color: var(--daub-text);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.bingo-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.bingo-banner {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.bingo-banner.active {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
 .called-grid {
   display: grid;
   grid-template-columns: repeat(10, minmax(0, 1fr));
@@ -221,6 +284,11 @@ header h1 {
   header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .bingo-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
   }
 
   .called-grid {

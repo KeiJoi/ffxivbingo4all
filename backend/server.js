@@ -95,6 +95,26 @@ io.on("connection", (socket) => {
     });
   });
 
+  socket.on("call_bingo", (payload) => {
+    const { roomCode, name } = payload || {};
+    console.log("call_bingo", { socketId: socket.id, roomCode, name });
+
+    if (!roomCode) {
+      return;
+    }
+
+    const caller =
+      typeof name === "string" && name.trim().length > 0
+        ? name.trim().slice(0, 32)
+        : "Unknown";
+
+    io.to(roomCode).emit("bingo_called", {
+      roomCode,
+      name: caller,
+      timestamp: Date.now(),
+    });
+  });
+
   socket.on("disconnect", (reason) => {
     console.log("socket_disconnected", { socketId: socket.id, reason });
   });

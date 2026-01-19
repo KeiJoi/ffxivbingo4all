@@ -10,6 +10,7 @@ const count =
       : 1
     : 0;
 const lettersParam = params.get("letters") || "BINGO";
+const playerParam = params.get("player") || params.get("name") || "";
 
 function normalizeHex(value) {
   if (!value) {
@@ -42,6 +43,56 @@ setThemeVariable("daub", "--daub-color", "#33d17a");
 
 const calledSet = new Set();
 const calledButtons = new Map();
+const bingoNameInput = document.getElementById("bingo-name");
+const bingoCallButton = document.getElementById("bingo-call");
+const bingoBanner = document.getElementById("bingo-banner");
+const roomCode = params.get("room") || masterSeed;
+let socket = null;
+let hasBingo = false;
+let isConnected = false;
+const cardMatrices = [];
+
+if (bingoNameInput && playerParam) {
+  bingoNameInput.value = playerParam;
+}
+
+function setBingoBanner(message) {
+  if (!bingoBanner) {
+    return;
+  }
+  bingoBanner.textContent = message;
+  bingoBanner.classList.toggle("active", Boolean(message));
+}
+
+function updateBingoButtonState() {
+  if (!bingoCallButton) {
+    return;
+  }
+  bingoCallButton.disabled = !isConnected || !hasBingo;
+}
+
+function getCallerName() {
+  const raw = (bingoNameInput && bingoNameInput.value) || playerParam;
+  const name = (raw || "Anonymous").trim();
+  return name.length > 0 ? name.slice(0, 32) : "Anonymous";
+}
+
+if (bingoCallButton) {
+  bingoCallButton.disabled = true;
+  bingoCallButton.addEventListener("click", () => {
+    if (!socket || !socket.connected) {
+      setBingoBanner("Not connected to the server.");
+      return;
+    }
+    if (!hasBingo) {
+      setBingoBanner("No bingo detected yet.");
+      return;
+    }
+    const caller = getCallerName();
+    socket.emit("call_bingo", { roomCode, name: caller });
+    setBingoBanner(`BINGO called by ${caller}.`);
+  });
+}
 
 const headers = (() => {
   let parts = [];
@@ -123,6 +174,63 @@ function setDaubed(cell, next) {
   cell.setAttribute("aria-pressed", String(next));
 }
 
+function isCellDaubed(cell) {
+  return cell.classList.contains("daubed") || cell.dataset.number === "free";
+}
+
+function cardHasBingo(matrix) {
+  for (let row = 0; row < 5; row += 1) {
+    let rowComplete = true;
+    for (let col = 0; col < 5; col += 1) {
+      if (!isCellDaubed(matrix[row][col])) {
+        rowComplete = false;
+        break;
+      }
+    }
+    if (rowComplete) {
+      return true;
+    }
+  }
+
+  for (let col = 0; col < 5; col += 1) {
+    let colComplete = true;
+    for (let row = 0; row < 5; row += 1) {
+      if (!isCellDaubed(matrix[row][col])) {
+        colComplete = false;
+        break;
+      }
+    }
+    if (colComplete) {
+      return true;
+    }
+  }
+
+  let diagComplete = true;
+  for (let i = 0; i < 5; i += 1) {
+    if (!isCellDaubed(matrix[i][i])) {
+      diagComplete = false;
+      break;
+    }
+  }
+  if (diagComplete) {
+    return true;
+  }
+
+  let antiDiagComplete = true;
+  for (let i = 0; i < 5; i += 1) {
+    if (!isCellDaubed(matrix[i][4 - i])) {
+      antiDiagComplete = false;
+      break;
+    }
+  }
+  return antiDiagComplete;
+}
+
+function updateBingoState() {
+  hasBingo = cardMatrices.some((matrix) => cardHasBingo(matrix));
+  updateBingoButtonState();
+}
+
 function canDaubCell(cell) {
   if (cell.dataset.number === "free") {
     return true;
@@ -143,6 +251,7 @@ function toggleDaubForNumber(value) {
     }
     setDaubed(cell, shouldDaub);
   });
+  updateBingoState();
 }
 
 function createCard(index) {
@@ -164,7 +273,9 @@ function createCard(index) {
 
   const gridEl = document.createElement("div");
   gridEl.className = "grid";
-  grid.forEach((row) => {
+  const matrix = [];
+  grid.forEach((row, rowIndex) => {
+    const rowCells = [];
     row.forEach((value) => {
       const cell = document.createElement("button");
       cell.type = "button";
@@ -186,12 +297,16 @@ function createCard(index) {
         }
         const next = !cell.classList.contains("daubed");
         setDaubed(cell, next);
+        updateBingoState();
       });
       gridEl.appendChild(cell);
+      rowCells.push(cell);
     });
+    matrix[rowIndex] = rowCells;
   });
 
   card.appendChild(gridEl);
+  cardMatrices.push(matrix);
   return card;
 }
 
@@ -218,6 +333,7 @@ cardsContainer.classList.toggle("multi", count > 1);
 for (let i = 0; i < count; i += 1) {
   cardsContainer.appendChild(createCard(i));
 }
+updateBingoState();
 
 const meta = document.getElementById("meta");
 meta.textContent =
@@ -228,16 +344,19 @@ meta.textContent =
 if (count > 0) {
   const defaultServerUrl = window.location.origin;
   const serverUrl = params.get("server") || defaultServerUrl;
-  const socket = io(serverUrl);
-  const roomCode = params.get("room") || masterSeed;
+  socket = io(serverUrl);
 
   socket.on("connect", () => {
     console.log("socket_connected", socket.id);
     socket.emit("join_room", roomCode);
+    isConnected = true;
+    updateBingoButtonState();
   });
 
   socket.on("disconnect", (reason) => {
     console.log("socket_disconnected", reason);
+    isConnected = false;
+    updateBingoButtonState();
   });
 
   function markCalled(value) {
@@ -268,5 +387,11 @@ if (count > 0) {
       return;
     }
     markCalled(String(payload.number));
+  });
+
+  socket.on("bingo_called", (payload) => {
+    console.log("bingo_called", payload);
+    const caller = payload && payload.name ? payload.name : "Unknown";
+    setBingoBanner(`BINGO called by ${caller}!`);
   });
 }
