@@ -12,25 +12,18 @@
   <body>
     <header>
       <h1>FFXIV Bingo</h1>
-      <div class="meta" id="meta"></div>
+      <div class="meta">
+        <div id="meta"></div>
+        <div class="player-name" id="player-name"></div>
+      </div>
     </header>
     <section class="called-panel">
       <h2>Called Numbers</h2>
       <div class="called-grid" id="called-grid"></div>
       <div class="bingo-panel">
-        <div class="bingo-row">
-          <label class="bingo-label" for="bingo-name">Caller</label>
-          <input
-            id="bingo-name"
-            class="bingo-input"
-            type="text"
-            maxlength="32"
-            placeholder="Your name"
-          />
-          <button id="bingo-call" class="bingo-button" type="button">
-            Call Bingo
-          </button>
-        </div>
+        <button id="bingo-call" class="bingo-button" type="button">
+          Call Bingo
+        </button>
         <div class="bingo-banner" id="bingo-banner" aria-live="polite"></div>
       </div>
       <div class="called-note">Only called numbers can be daubed.</div>

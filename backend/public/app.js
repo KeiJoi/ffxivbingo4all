@@ -43,17 +43,22 @@ setThemeVariable("daub", "--daub-color", "#33d17a");
 
 const calledSet = new Set();
 const calledButtons = new Map();
-const bingoNameInput = document.getElementById("bingo-name");
 const bingoCallButton = document.getElementById("bingo-call");
 const bingoBanner = document.getElementById("bingo-banner");
+const playerNameEl = document.getElementById("player-name");
 const roomCode = params.get("room") || masterSeed;
 let socket = null;
 let hasBingo = false;
 let isConnected = false;
 const cardMatrices = [];
 
-if (bingoNameInput && playerParam) {
-  bingoNameInput.value = playerParam;
+const playerName =
+  (playerParam || "").trim().length > 0 ? playerParam.trim().slice(0, 32) : "";
+
+if (playerNameEl) {
+  playerNameEl.textContent = playerName
+    ? `Player: ${playerName}`
+    : "Player: Guest";
 }
 
 function setBingoBanner(message) {
@@ -72,9 +77,7 @@ function updateBingoButtonState() {
 }
 
 function getCallerName() {
-  const raw = (bingoNameInput && bingoNameInput.value) || playerParam;
-  const name = (raw || "Anonymous").trim();
-  return name.length > 0 ? name.slice(0, 32) : "Anonymous";
+  return playerName.length > 0 ? playerName : "Guest";
 }
 
 if (bingoCallButton) {

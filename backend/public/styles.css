@@ -72,6 +72,14 @@ header h1 {
 .meta {
   font-size: 12px;
   opacity: 0.8;
+  display: grid;
+  gap: 4px;
+  text-align: right;
+}
+
+.player-name {
+  font-weight: 600;
+  letter-spacing: 0.4px;
 }
 
 .called-panel {
@@ -96,34 +104,6 @@ header h1 {
   padding: 8px;
   display: grid;
   gap: 8px;
-}
-
-.bingo-row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 8px;
-  align-items: center;
-}
-
-.bingo-label {
-  font-size: 11px;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  opacity: 0.8;
-}
-
-.bingo-input {
-  background: var(--cell-bg);
-  border: 1px solid var(--cell-border);
-  color: inherit;
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 12px;
-}
-
-.bingo-input:focus {
-  outline: 2px solid var(--called-color);
-  outline-offset: 0;
 }
 
 .bingo-button {
@@ -286,9 +266,8 @@ header h1 {
     align-items: flex-start;
   }
 
-  .bingo-row {
-    grid-template-columns: 1fr;
-    align-items: stretch;
+  .meta {
+    text-align: left;
   }
 
   .called-grid {
