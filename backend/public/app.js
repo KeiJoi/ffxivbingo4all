@@ -41,6 +41,7 @@ setThemeVariable("card", "--card-bg", "#1b2026");
 setThemeVariable("header", "--header-bg", "#2a313a");
 setThemeVariable("text", "--text-color", "#e6edf3");
 setThemeVariable("daub", "--daub-color", "#33d17a");
+setThemeVariable("ball", "--ball-color", "#f3f3f3");
 
 const calledSet = new Set();
 const calledButtons = new Map();

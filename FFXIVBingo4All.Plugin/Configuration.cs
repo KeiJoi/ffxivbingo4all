@@ -22,6 +22,7 @@ namespace FFXIVBingo4All
         public string CustomHeaderLetters { get; set; } = "BINGO";
         public string VenueName { get; set; } = "FFXIV Bingo";
         public bool BingoActive { get; set; } = true;
+        public string GameType { get; set; } = "Single Line";
 
         // Web settings
         public string ServerBaseUrl { get; set; } = "http://localhost:3000";
@@ -34,6 +35,7 @@ namespace FFXIVBingo4All
         public Vector4 HeaderColor { get; set; } = new(0.16f, 0.19f, 0.23f, 1.0f);
         public Vector4 TextColor { get; set; } = new(0.90f, 0.93f, 0.96f, 1.0f);
         public Vector4 DaubColor { get; set; } = new(0.20f, 0.82f, 0.48f, 1.0f);
+        public Vector4 BallColor { get; set; } = new(0.96f, 0.96f, 0.96f, 1.0f);
 
         // Anti-cheat / player ledger
         public Dictionary<string, PlayerData> IssuedCards { get; set; } = new();

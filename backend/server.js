@@ -34,6 +34,7 @@ function getSession(roomCode) {
       allowedSeeds: [],
       daubs: {},
       lastBingo: null,
+      gameType: "Single Line",
       updatedAt: Date.now(),
     };
   }
@@ -41,7 +42,7 @@ function getSession(roomCode) {
 }
 
 app.post("/api/host-sync", (req, res) => {
-  const { roomCode, calledNumbers, allowedSeeds } = req.body || {};
+  const { roomCode, calledNumbers, allowedSeeds, gameType } = req.body || {};
   console.log("api_host_sync", req.body);
 
   if (!roomCode) {
@@ -65,6 +66,9 @@ app.post("/api/host-sync", (req, res) => {
       }
     });
   }
+  if (typeof gameType === "string" && gameType.trim().length > 0) {
+    session.gameType = gameType.trim();
+  }
   touchSession(session);
 
   console.log("host_sync_updated", {
@@ -76,6 +80,7 @@ app.post("/api/host-sync", (req, res) => {
     ok: true,
     calledNumbers: session.calledNumbers,
     allowedSeeds: session.allowedSeeds,
+    gameType: session.gameType,
   });
 });
 
@@ -93,6 +98,7 @@ app.get("/api/admin/rooms", (req, res) => {
       allowedSeedsCount: session.allowedSeeds.length,
       daubPlayers,
       lastBingo: session.lastBingo,
+      gameType: session.gameType,
       updatedAt: session.updatedAt || null,
     };
   });
@@ -133,6 +139,7 @@ app.get("/api/room-state", (req, res) => {
     allowedSeeds: session.allowedSeeds,
     daubs: session.daubs,
     lastBingo: session.lastBingo,
+    gameType: session.gameType,
   });
 });
 

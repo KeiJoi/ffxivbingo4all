@@ -48,6 +48,8 @@ namespace FFXIVBingo4All
         private bool showWebSettingsWindow = false;
         private bool showResetPopup = false;
         private bool showServerRoomsWindow = false;
+        private bool showCalledBallsWindow = false;
+        private bool showStartPopup = false;
         private string lastRollStatus = string.Empty;
         private string lastPostStatus = string.Empty;
         private readonly ConcurrentQueue<QueuedChat> chatQueue = new();
@@ -81,6 +83,21 @@ namespace FFXIVBingo4All
         private List<AdminRoomInfo> adminRooms = new();
         private bool adminRoomsLoading = false;
         private string adminRoomsStatus = string.Empty;
+        private int broadcastCommandIndex = 0;
+        private string broadcastCopyStatus = string.Empty;
+        private string skinCopyStatus = string.Empty;
+        private int gameTypeIndex = 0;
+        private int resumeRoomIndex = -1;
+        private string resumeRoomInput = string.Empty;
+
+        private static readonly string[] BroadcastCommands = { "/yell", "/shout" };
+        private static readonly string[] GameTypes =
+        {
+            "Single Line",
+            "Two Lines",
+            "Four Corners",
+            "Blackout",
+        };
 
         public Plugin()
         {
@@ -232,6 +249,7 @@ namespace FFXIVBingo4All
                 roomCode = configuration.CurrentRoomCode,
                 calledNumbers = configuration.CalledNumbers,
                 allowedSeeds = configuration.IssuedCards.Keys.ToList(),
+                gameType = configuration.GameType,
             };
 
             PluginLog.Information(
@@ -328,6 +346,8 @@ namespace FFXIVBingo4All
             DrawPlayersWindow();
             DrawWebSettingsWindow();
             DrawServerRoomsWindow();
+            DrawCalledBallsWindow();
+            DrawStartPopup();
         }
 
         private void DrawStats()
@@ -341,6 +361,7 @@ namespace FFXIVBingo4All
             ImGui.Text($"Total Pot: {totalPot}");
             ImGui.Text($"Prize Pool: {prizePool:0.##}");
             ImGui.Text($"Status: {(configuration.BingoActive ? "Running" : "Stopped")}");
+            ImGui.Text($"Game Type: {configuration.GameType}");
             if (!string.IsNullOrWhiteSpace(lastBingoDisplay))
             {
                 ImGui.TextColored(
@@ -361,7 +382,7 @@ namespace FFXIVBingo4All
                 changed = true;
             }
 
-            if (ImGui.Button(configuration.BingoActive ? "Stop Bingo" : "Start New Bingo"))
+            if (ImGui.Button(configuration.BingoActive ? "Stop Bingo" : "Start Bingo"))
             {
                 if (configuration.BingoActive)
                 {
@@ -369,7 +390,7 @@ namespace FFXIVBingo4All
                 }
                 else
                 {
-                    StartNewBingo();
+                    OpenStartPopup();
                 }
             }
 
@@ -443,6 +464,25 @@ namespace FFXIVBingo4All
                 changed = true;
             }
 
+            var ball = configuration.BallColor;
+            if (ImGui.ColorEdit4("Ball Color", ref ball))
+            {
+                configuration.BallColor = ball;
+                changed = true;
+            }
+
+            if (ImGui.Button("SKIN ME"))
+            {
+                var skin = BuildSkinQueryString();
+                ImGui.SetClipboardText(skin);
+                skinCopyStatus = "Skin copied.";
+            }
+
+            if (!string.IsNullOrWhiteSpace(skinCopyStatus))
+            {
+                ImGui.Text(skinCopyStatus);
+            }
+
             if (ImGui.Button("Web Settings"))
             {
                 OpenWebSettingsWindow();
@@ -452,6 +492,12 @@ namespace FFXIVBingo4All
             if (ImGui.Button("Server Rooms"))
             {
                 OpenServerRoomsWindow();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Called Balls"))
+            {
+                showCalledBallsWindow = true;
             }
 
             ImGui.SameLine();
@@ -771,13 +817,14 @@ namespace FFXIVBingo4All
 
             if (ImGui.BeginTable(
                 "rooms",
-                6,
+                7,
                 ImGuiTableFlags.Borders | ImGuiTableFlags.SizingFixedFit))
             {
                 ImGui.TableSetupColumn("Room");
                 ImGui.TableSetupColumn("Called");
                 ImGui.TableSetupColumn("Seeds");
                 ImGui.TableSetupColumn("Daubs");
+                ImGui.TableSetupColumn("Game");
                 ImGui.TableSetupColumn("Updated");
                 ImGui.TableSetupColumn("Actions");
                 ImGui.TableHeadersRow();
@@ -794,8 +841,10 @@ namespace FFXIVBingo4All
                     ImGui.TableSetColumnIndex(3);
                     ImGui.Text(room.DaubPlayers.ToString());
                     ImGui.TableSetColumnIndex(4);
-                    ImGui.Text(room.UpdatedAt);
+                    ImGui.Text(room.GameType);
                     ImGui.TableSetColumnIndex(5);
+                    ImGui.Text(room.UpdatedAt);
+                    ImGui.TableSetColumnIndex(6);
                     if (ImGui.Button($"Join##{room.RoomCode}"))
                     {
                         SelectRoom(room.RoomCode, false);
@@ -811,6 +860,193 @@ namespace FFXIVBingo4All
                     if (ImGui.Button($"Close##{room.RoomCode}"))
                     {
                         _ = Task.Run(() => CloseAdminRoomAsync(room.RoomCode));
+                    }
+                }
+
+                ImGui.EndTable();
+            }
+
+            ImGui.End();
+        }
+
+        private void OpenStartPopup()
+        {
+            showStartPopup = true;
+            resumeRoomInput = configuration.CurrentRoomCode;
+            gameTypeIndex = Array.IndexOf(GameTypes, configuration.GameType);
+            if (gameTypeIndex < 0)
+            {
+                gameTypeIndex = 0;
+            }
+            resumeRoomIndex = -1;
+            _ = Task.Run(FetchAdminRoomsAsync);
+            ImGui.OpenPopup("Start Bingo");
+        }
+
+        private void DrawStartPopup()
+        {
+            if (!showStartPopup)
+            {
+                return;
+            }
+
+            bool open = true;
+            if (ImGui.BeginPopupModal("Start Bingo", ref open, ImGuiWindowFlags.AlwaysAutoResize))
+            {
+                ImGui.Text("Game Type");
+                ImGui.Combo("##game_type", ref gameTypeIndex, GameTypes, GameTypes.Length);
+
+                ImGui.Separator();
+                ImGui.Text("Resume Room");
+
+                List<AdminRoomInfo> rooms;
+                lock (adminRoomsLock)
+                {
+                    rooms = new List<AdminRoomInfo>(adminRooms);
+                }
+
+                if (rooms.Count > 0)
+                {
+                    var roomLabels = rooms.Select(r => r.RoomCode).ToArray();
+                    if (resumeRoomIndex < 0 || resumeRoomIndex >= roomLabels.Length)
+                    {
+                        resumeRoomIndex = 0;
+                    }
+                    ImGui.Combo("##resume_room", ref resumeRoomIndex, roomLabels, roomLabels.Length);
+                    resumeRoomInput = roomLabels[resumeRoomIndex];
+                }
+                else
+                {
+                    ImGui.InputText("Room Code", ref resumeRoomInput, 64);
+                }
+
+                ImGui.Separator();
+                if (ImGui.Button("Start New Game"))
+                {
+                    configuration.GameType = GameTypes[gameTypeIndex];
+                    StartNewBingo();
+                    showStartPopup = false;
+                    ImGui.CloseCurrentPopup();
+                }
+
+                ImGui.SameLine();
+                bool hasResumeRoom = !string.IsNullOrWhiteSpace(resumeRoomInput);
+                if (!hasResumeRoom)
+                {
+                    ImGui.BeginDisabled();
+                }
+
+                if (ImGui.Button("Resume Selected"))
+                {
+                    configuration.GameType = GameTypes[gameTypeIndex];
+                    SelectRoom(resumeRoomInput.Trim(), true);
+                    showStartPopup = false;
+                    ImGui.CloseCurrentPopup();
+                }
+
+                if (!hasResumeRoom)
+                {
+                    ImGui.EndDisabled();
+                }
+
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel"))
+                {
+                    showStartPopup = false;
+                    ImGui.CloseCurrentPopup();
+                }
+
+                ImGui.EndPopup();
+            }
+            else
+            {
+                showStartPopup = false;
+            }
+        }
+
+        private void DrawCalledBallsWindow()
+        {
+            if (!showCalledBallsWindow)
+            {
+                return;
+            }
+
+            if (!ImGui.Begin(
+                "Called Balls",
+                ref showCalledBallsWindow,
+                ImGuiWindowFlags.AlwaysAutoResize))
+            {
+                ImGui.End();
+                return;
+            }
+
+            int lastCalled = configuration.CalledNumbers.Count > 0
+                ? configuration.CalledNumbers[^1]
+                : 0;
+            bool hasLast = lastCalled > 0;
+
+            ImGui.Text("Broadcast Command");
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(120);
+            ImGui.Combo("##broadcast", ref broadcastCommandIndex, BroadcastCommands, BroadcastCommands.Length);
+
+            ImGui.Text("Last Called");
+            ImGui.SetWindowFontScale(1.6f);
+            if (ImGui.Button(hasLast ? lastCalled.ToString() : "--", new Vector2(120, 0)))
+            {
+                if (hasLast)
+                {
+                    string command = $"{BroadcastCommands[broadcastCommandIndex]} {lastCalled}";
+                    ImGui.SetClipboardText(command);
+                    broadcastCopyStatus = $"Copied: {command}";
+                }
+                else
+                {
+                    broadcastCopyStatus = "No number has been called yet.";
+                }
+            }
+            ImGui.SetWindowFontScale(1.0f);
+
+            if (!string.IsNullOrWhiteSpace(broadcastCopyStatus))
+            {
+                ImGui.Text(broadcastCopyStatus);
+            }
+
+            var calledSet = new HashSet<int>(configuration.CalledNumbers);
+            if (ImGui.BeginTable(
+                "called_grid",
+                5,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.SizingFixedFit))
+            {
+                ImGui.TableSetupColumn("B");
+                ImGui.TableSetupColumn("I");
+                ImGui.TableSetupColumn("N");
+                ImGui.TableSetupColumn("G");
+                ImGui.TableSetupColumn("O");
+                ImGui.TableHeadersRow();
+
+                for (int row = 0; row < 15; row++)
+                {
+                    ImGui.TableNextRow();
+                    for (int col = 0; col < 5; col++)
+                    {
+                        int number = (col * 15) + row + 1;
+                        bool called = calledSet.Contains(number);
+                        ImGui.TableSetColumnIndex(col);
+                        if (called)
+                        {
+                            ImGui.PushStyleColor(ImGuiCol.Button, configuration.DaubColor);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, configuration.DaubColor);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, configuration.DaubColor);
+                            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0f, 0f, 0f, 1f));
+                        }
+
+                        ImGui.Button(number.ToString(), new Vector2(40, 0));
+
+                        if (called)
+                        {
+                            ImGui.PopStyleColor(4);
+                        }
                     }
                 }
 
@@ -879,6 +1115,7 @@ namespace FFXIVBingo4All
             var header = ColorToHex(configuration.HeaderColor);
             var text = ColorToHex(configuration.TextColor);
             var daub = ColorToHex(configuration.DaubColor);
+            var ball = ColorToHex(configuration.BallColor);
             var venue = configuration.VenueName?.Trim();
 
             var url = AppendQueryParam(GetClientBaseUrl(), "seed", seed);
@@ -893,6 +1130,7 @@ namespace FFXIVBingo4All
             url = AppendQueryParam(url, "header", header);
             url = AppendQueryParam(url, "text", text);
             url = AppendQueryParam(url, "daub", daub);
+            url = AppendQueryParam(url, "ball", ball);
             url = AppendQueryParam(url, "server", GetServerBaseUrl());
             if (!string.IsNullOrWhiteSpace(player))
             {
@@ -938,6 +1176,18 @@ namespace FFXIVBingo4All
         {
             var separator = url.Contains("?") ? "&" : "?";
             return $"{url}{separator}{key}={Uri.EscapeDataString(value)}";
+        }
+
+        private string BuildSkinQueryString()
+        {
+            var bg = ColorToHex(configuration.BgColor);
+            var card = ColorToHex(configuration.CardColor);
+            var header = ColorToHex(configuration.HeaderColor);
+            var text = ColorToHex(configuration.TextColor);
+            var daub = ColorToHex(configuration.DaubColor);
+            var ball = ColorToHex(configuration.BallColor);
+
+            return $"bg={bg}&card={card}&header={header}&text={text}&daub={daub}&ball={ball}";
         }
 
         private void DebugChat(string message, bool isError = false)
@@ -1039,6 +1289,9 @@ namespace FFXIVBingo4All
                         CalledNumbersCount = roomEl.GetProperty("calledNumbersCount").GetInt32(),
                         AllowedSeedsCount = roomEl.GetProperty("allowedSeedsCount").GetInt32(),
                         DaubPlayers = roomEl.GetProperty("daubPlayers").GetInt32(),
+                        GameType = roomEl.TryGetProperty("gameType", out var gameEl)
+                            ? gameEl.GetString() ?? "-"
+                            : "-",
                         UpdatedAt = FormatTimestamp(roomEl, "updatedAt"),
                     };
                     rooms.Add(info);
@@ -1152,6 +1405,7 @@ namespace FFXIVBingo4All
             public int CalledNumbersCount { get; set; }
             public int AllowedSeedsCount { get; set; }
             public int DaubPlayers { get; set; }
+            public string GameType { get; set; } = "-";
             public string UpdatedAt { get; set; } = "-";
         }
 
