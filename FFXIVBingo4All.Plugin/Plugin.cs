@@ -6,6 +6,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Numerics;
+using System.Collections.Concurrent;
 using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.IoC;
@@ -20,13 +22,17 @@ namespace FFXIVBingo4All
         private const string DefaultServerBaseUrl = "http://localhost:3000";
         private const string DefaultClientBaseUrl = "http://localhost:3000";
         private static readonly Regex RollRegex =
-            new(@"You roll a (\d+) \(1-75\)", RegexOptions.Compiled);
+            new(
+                @"(?:Random!\s*)?You roll a (\d+)\s*\((?:1\s*-\s*75|out of 75)\)\.?",
+                RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         public string Name => "FFXIV Bingo 4 All";
 
         [PluginService] private static IDalamudPluginInterface PluginInterface { get; set; } = null!;
         [PluginService] private static IChatGui ChatGui { get; set; } = null!;
+        [PluginService] private static ICommandManager CommandManager { get; set; } = null!;
         [PluginService] private static IObjectTable ObjectTable { get; set; } = null!;
+        [PluginService] private static IPluginLog PluginLog { get; set; } = null!;
 
         private readonly HttpClient httpClient = new()
         {
@@ -39,6 +45,22 @@ namespace FFXIVBingo4All
         private bool isOpen = true;
         private bool showPlayersWindow = false;
         private bool showWebSettingsWindow = false;
+        private bool showResetPopup = false;
+        private string lastRollStatus = string.Empty;
+        private string lastPostStatus = string.Empty;
+        private readonly ConcurrentQueue<QueuedChat> chatQueue = new();
+
+        private readonly struct QueuedChat
+        {
+            public QueuedChat(string message, bool isError)
+            {
+                Message = message;
+                IsError = isError;
+            }
+
+            public string Message { get; }
+            public bool IsError { get; }
+        }
 
         private string playerName = string.Empty;
         private int playerCardCount = 1;
@@ -84,15 +106,24 @@ namespace FFXIVBingo4All
             ref bool isHandled)
         {
             var text = message.TextValue;
+            if (text.StartsWith("[Bingo]", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
             var match = RollRegex.Match(text);
             if (!match.Success)
             {
+                if (text.Contains("roll", StringComparison.OrdinalIgnoreCase))
+                {
+                    DebugChat($"Roll parse miss: \"{text}\"");
+                }
                 return;
             }
 
             var senderName = sender.TextValue;
             var localName = ObjectTable.LocalPlayer?.Name.TextValue ?? string.Empty;
             if (!string.IsNullOrEmpty(senderName) &&
+                !string.Equals(senderName, "You", StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(senderName, localName, StringComparison.OrdinalIgnoreCase))
             {
                 return;
@@ -103,32 +134,52 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            HandleCallNumber(rolled);
+            manualNumber = rolled;
+            DebugChat($"Roll detected: {rolled} (sender: {senderName}, type: {type})");
+            TryHandleCallNumber(rolled, "roll");
         }
 
-        private void HandleCallNumber(int number)
+        private bool TryHandleCallNumber(int number, string source)
         {
             if (number < 1 || number > 75)
             {
-                return;
+                lastRollStatus = $"Invalid roll ({number}).";
+                return false;
             }
 
             if (configuration.CalledNumbers.Contains(number))
             {
                 ChatGui.PrintError("DUPLICATE ROLL! Reroll.");
-                return;
+                lastRollStatus = "DUPLICATE NUMBER";
+                return false;
             }
 
             configuration.CalledNumbers.Add(number);
             configuration.Save();
+            lastRollStatus = $"Called {number} ({source}).";
 
             _ = Task.Run(() => PostCallNumberAsync(number));
+            return true;
+        }
+
+        private void RollRandomNumber()
+        {
+            try
+            {
+                CommandManager.ProcessCommand("/random 75");
+            }
+            catch (Exception)
+            {
+                ChatGui.PrintError("Failed to execute /random 75.");
+            }
         }
 
         private async Task SyncHostStateAsync()
         {
             if (string.IsNullOrWhiteSpace(configuration.CurrentRoomCode))
             {
+                lastPostStatus = "Missing room code.";
+                DebugChat("Missing room code for host sync.");
                 return;
             }
 
@@ -138,13 +189,23 @@ namespace FFXIVBingo4All
                 calledNumbers = configuration.CalledNumbers,
             };
 
-            await PostJsonAsync("/api/host-sync", payload).ConfigureAwait(false);
+            PluginLog.Information(
+                "Host sync: room={Room} count={Count}",
+                configuration.CurrentRoomCode,
+                configuration.CalledNumbers.Count);
+            DebugChat(
+                $"Host sync: room {configuration.CurrentRoomCode}, {configuration.CalledNumbers.Count} numbers.");
+            var ok = await PostJsonAsync("/api/host-sync", payload).ConfigureAwait(false);
+            lastPostStatus = ok ? "Host sync ok." : "Host sync failed.";
+            DebugChat(ok ? "Host sync complete." : "Host sync failed.");
         }
 
         private async Task PostCallNumberAsync(int number)
         {
             if (string.IsNullOrWhiteSpace(configuration.CurrentRoomCode))
             {
+                lastPostStatus = "Missing room code.";
+                DebugChat("Missing room code for call number.");
                 return;
             }
 
@@ -154,26 +215,44 @@ namespace FFXIVBingo4All
                 number,
             };
 
-            await PostJsonAsync("/api/call-number", payload).ConfigureAwait(false);
+            PluginLog.Information(
+                "Call number: room={Room} number={Number}",
+                configuration.CurrentRoomCode,
+                number);
+            lastPostStatus = $"Posting {number}...";
+            DebugChat($"Posting {number} to room {configuration.CurrentRoomCode}...");
+            var ok = await PostJsonAsync("/api/call-number", payload).ConfigureAwait(false);
+            lastPostStatus = ok ? $"Posted {number}." : $"Post failed ({number}).";
+            DebugChat(ok ? $"Posted {number}." : $"Failed to post {number}.");
+            if (!ok)
+            {
+                DebugChat($"Failed to send {number} to server.", true);
+            }
         }
 
-        private async Task PostJsonAsync(string path, object payload)
+        private async Task<bool> PostJsonAsync(string path, object payload)
         {
             try
             {
                 var json = JsonSerializer.Serialize(payload);
                 using var content = new StringContent(json, Encoding.UTF8, "application/json");
                 var serverBaseUrl = GetServerBaseUrl();
-                await httpClient.PostAsync($"{serverBaseUrl}{path}", content).ConfigureAwait(false);
+                var url = $"{serverBaseUrl}{path}";
+                var response = await httpClient.PostAsync(url, content).ConfigureAwait(false);
+                PluginLog.Information("POST {Url} -> {Status}", url, response.StatusCode);
+                return response.IsSuccessStatusCode;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // Ignore network errors to avoid spamming chat.
+                PluginLog.Error(ex, "POST {Path} failed", path);
+                DebugChat($"POST {path} failed: {ex.Message}");
+                return false;
             }
         }
 
         private void Draw()
         {
+            FlushChatQueue();
             if (!isOpen)
             {
                 return;
@@ -284,6 +363,18 @@ namespace FFXIVBingo4All
                 OpenWebSettingsWindow();
             }
 
+            ImGui.SameLine();
+            if (ImGui.Button("Reset Room & Tickets"))
+            {
+                showResetPopup = true;
+                ImGui.OpenPopup("Reset Room");
+            }
+
+            if (showResetPopup)
+            {
+                DrawResetPopup();
+            }
+
             if (changed)
             {
                 configuration.Save();
@@ -299,6 +390,11 @@ namespace FFXIVBingo4All
 
             if (ImGui.Button("Generate Link"))
             {
+                if (string.IsNullOrWhiteSpace(configuration.CurrentRoomCode))
+                {
+                    configuration.CurrentRoomCode = Guid.NewGuid().ToString();
+                }
+
                 var seed = Guid.NewGuid().ToString();
                 var letters = NormalizeLetters(configuration.CustomHeaderLetters);
                 generatedLink = BuildClientUrl(seed, playerCardCount, letters);
@@ -330,11 +426,43 @@ namespace FFXIVBingo4All
         private void DrawManualControl()
         {
             ImGui.Text("Manual Control");
+            if (ImGui.Button("Roll /random 75"))
+            {
+                RollRandomNumber();
+            }
+
             ImGui.InputInt("Call Number", ref manualNumber);
+
+            bool outOfRange = manualNumber < 1 || manualNumber > 75;
+            bool isDuplicate = configuration.CalledNumbers.Contains(manualNumber);
+            if (outOfRange || isDuplicate)
+            {
+                ImGui.BeginDisabled();
+            }
 
             if (ImGui.Button("Call Number"))
             {
-                HandleCallNumber(manualNumber);
+                TryHandleCallNumber(manualNumber, "manual");
+            }
+
+            if (outOfRange || isDuplicate)
+            {
+                ImGui.EndDisabled();
+            }
+
+            if (isDuplicate)
+            {
+                ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), "DUPLICATE NUMBER");
+            }
+
+            if (!string.IsNullOrWhiteSpace(lastRollStatus))
+            {
+                ImGui.Text($"Last Roll: {lastRollStatus}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(lastPostStatus))
+            {
+                ImGui.Text($"Last Send: {lastPostStatus}");
             }
         }
 
@@ -456,6 +584,43 @@ namespace FFXIVBingo4All
             ImGui.End();
         }
 
+        private void DrawResetPopup()
+        {
+            bool open = true;
+            if (ImGui.BeginPopupModal("Reset Room", ref open, ImGuiWindowFlags.AlwaysAutoResize))
+            {
+                ImGui.Text("This clears all called numbers and issued cards.");
+                ImGui.Text("A new room code will be created.");
+                ImGui.Separator();
+
+                if (ImGui.Button("Reset Now"))
+                {
+                    configuration.CurrentRoomCode = Guid.NewGuid().ToString();
+                    configuration.CalledNumbers.Clear();
+                    configuration.IssuedCards.Clear();
+                    generatedLink = string.Empty;
+                    configuration.Save();
+                    _ = Task.Run(SyncHostStateAsync);
+
+                    showResetPopup = false;
+                    ImGui.CloseCurrentPopup();
+                }
+
+                ImGui.SameLine();
+                if (ImGui.Button("Cancel"))
+                {
+                    showResetPopup = false;
+                    ImGui.CloseCurrentPopup();
+                }
+
+                ImGui.EndPopup();
+            }
+            else
+            {
+                showResetPopup = false;
+            }
+        }
+
         private void ApplyPlayerUpdates(IEnumerable<(string oldSeed, string playerName, int newCount)> updates)
         {
             foreach (var update in updates)
@@ -525,6 +690,10 @@ namespace FFXIVBingo4All
             url = AppendQueryParam(url, "text", text);
             url = AppendQueryParam(url, "daub", daub);
             url = AppendQueryParam(url, "server", GetServerBaseUrl());
+            if (!string.IsNullOrWhiteSpace(configuration.CurrentRoomCode))
+            {
+                url = AppendQueryParam(url, "room", configuration.CurrentRoomCode);
+            }
             return url;
         }
 
@@ -561,6 +730,26 @@ namespace FFXIVBingo4All
         {
             var separator = url.Contains("?") ? "&" : "?";
             return $"{url}{separator}{key}={Uri.EscapeDataString(value)}";
+        }
+
+        private void DebugChat(string message, bool isError = false)
+        {
+            chatQueue.Enqueue(new QueuedChat(message, isError));
+        }
+
+        private void FlushChatQueue()
+        {
+            while (chatQueue.TryDequeue(out var item))
+            {
+                if (item.IsError)
+                {
+                    ChatGui.PrintError($"[Bingo] {item.Message}");
+                }
+                else
+                {
+                    ChatGui.Print($"[Bingo] {item.Message}");
+                }
+            }
         }
     }
 }

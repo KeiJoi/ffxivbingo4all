@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>FFXIV Bingo Client</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>FFXIV Bingo</h1>
+      <div class="meta" id="meta"></div>
+    </header>
+    <section class="called-panel">
+      <h2>Called Numbers</h2>
+      <div class="called-grid" id="called-grid"></div>
+      <div class="called-note">Only called numbers can be daubed.</div>
+    </section>
+    <main class="cards" id="cards"></main>
+
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
