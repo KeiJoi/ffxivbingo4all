@@ -11,6 +11,7 @@ const count =
     : 0;
 const lettersParam = params.get("letters") || "BINGO";
 const playerParam = params.get("player") || params.get("name") || "";
+const titleParam = params.get("title") || "";
 
 function normalizeHex(value) {
   if (!value) {
@@ -46,14 +47,26 @@ const calledButtons = new Map();
 const bingoCallButton = document.getElementById("bingo-call");
 const bingoBanner = document.getElementById("bingo-banner");
 const playerNameEl = document.getElementById("player-name");
+const pageTitleEl = document.querySelector("header h1");
 const roomCode = params.get("room") || masterSeed;
 let socket = null;
 let hasBingo = false;
 let isConnected = false;
+let enforceSeeds = false;
 const cardMatrices = [];
 
 const playerName =
   (playerParam || "").trim().length > 0 ? playerParam.trim().slice(0, 32) : "";
+const pageTitle =
+  (titleParam || "").trim().length > 0 ? titleParam.trim().slice(0, 40) : "";
+
+if (pageTitleEl) {
+  pageTitleEl.textContent = pageTitle || "FFXIV Bingo";
+}
+
+if (pageTitle) {
+  document.title = pageTitle;
+}
 
 if (playerNameEl) {
   playerNameEl.textContent = playerName
@@ -67,6 +80,16 @@ function setBingoBanner(message) {
   }
   bingoBanner.textContent = message;
   bingoBanner.classList.toggle("active", Boolean(message));
+}
+
+function showCheatMessage() {
+  document.body.classList.add("cheater");
+  document.body.innerHTML = `
+    <div class="cheat-screen">
+      <h2>YOU ARE CHEATING!</h2>
+      <p>This card hash is not registered for the current room.</p>
+    </div>
+  `;
 }
 
 function updateBingoButtonState() {
@@ -92,7 +115,7 @@ if (bingoCallButton) {
       return;
     }
     const caller = getCallerName();
-    socket.emit("call_bingo", { roomCode, name: caller });
+    socket.emit("call_bingo", { roomCode, name: caller, seed: masterSeed });
     setBingoBanner(`BINGO called by ${caller}.`);
   });
 }
@@ -177,6 +200,26 @@ function setDaubed(cell, next) {
   cell.setAttribute("aria-pressed", String(next));
 }
 
+function emitDaubUpdate(cell, next) {
+  if (!socket || !socket.connected) {
+    return;
+  }
+  if (cell.dataset.number === "free") {
+    return;
+  }
+  const cardIndex = Number(cell.dataset.card);
+  if (!Number.isFinite(cardIndex)) {
+    return;
+  }
+  socket.emit("daub_update", {
+    roomCode,
+    seed: masterSeed,
+    cardIndex,
+    number: cell.dataset.number,
+    daubed: next,
+  });
+}
+
 function isCellDaubed(cell) {
   return cell.classList.contains("daubed") || cell.dataset.number === "free";
 }
@@ -253,6 +296,7 @@ function toggleDaubForNumber(value) {
       return;
     }
     setDaubed(cell, shouldDaub);
+    emitDaubUpdate(cell, shouldDaub);
   });
   updateBingoState();
 }
@@ -283,6 +327,7 @@ function createCard(index) {
       const cell = document.createElement("button");
       cell.type = "button";
       cell.className = "cell bingo-cell";
+      cell.dataset.card = String(index);
       if (value === "free") {
         cell.classList.add("free", "daubed");
         cell.dataset.number = "free";
@@ -300,6 +345,7 @@ function createCard(index) {
         }
         const next = !cell.classList.contains("daubed");
         setDaubed(cell, next);
+        emitDaubUpdate(cell, next);
         updateBingoState();
       });
       gridEl.appendChild(cell);
@@ -351,7 +397,7 @@ if (count > 0) {
 
   socket.on("connect", () => {
     console.log("socket_connected", socket.id);
-    socket.emit("join_room", roomCode);
+    socket.emit("join_room", { roomCode, seed: masterSeed });
     isConnected = true;
     updateBingoButtonState();
   });
@@ -378,6 +424,16 @@ if (count > 0) {
 
   socket.on("init_state", (payload) => {
     console.log("init_state", payload);
+    const allowedSeeds = (payload && payload.allowedSeeds) || [];
+    enforceSeeds =
+      Boolean(payload && payload.enforceSeeds) || allowedSeeds.length > 0;
+    if (enforceSeeds && !allowedSeeds.includes(masterSeed)) {
+      showCheatMessage();
+      if (socket) {
+        socket.disconnect();
+      }
+      return;
+    }
     const called = (payload && payload.calledNumbers) || [];
     called.forEach((value) => {
       markCalled(String(value));
@@ -396,5 +452,12 @@ if (count > 0) {
     console.log("bingo_called", payload);
     const caller = payload && payload.name ? payload.name : "Unknown";
     setBingoBanner(`BINGO called by ${caller}!`);
+  });
+
+  socket.on("cheat_detected", () => {
+    showCheatMessage();
+    if (socket) {
+      socket.disconnect();
+    }
   });
 }

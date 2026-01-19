@@ -279,3 +279,32 @@ header h1 {
     font-size: 16px;
   }
 }
+
+body.cheater {
+  display: grid;
+  place-items: center;
+  background: #2a0d0d;
+  color: #fff;
+  text-align: center;
+}
+
+.cheat-screen {
+  max-width: 720px;
+  padding: 32px;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.45);
+}
+
+.cheat-screen h2 {
+  margin: 0 0 12px 0;
+  font-size: 32px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.cheat-screen p {
+  margin: 0;
+  font-size: 16px;
+  opacity: 0.9;
+}

@@ -17,12 +17,16 @@ namespace FFXIVBingo4All
 
         // Financial settings
         public int CostPerCard { get; set; } = 0;
+        public int StartingPot { get; set; } = 0;
         public float PrizePercentage { get; set; } = 0.0f;
         public string CustomHeaderLetters { get; set; } = "BINGO";
+        public string VenueName { get; set; } = "FFXIV Bingo";
+        public bool BingoActive { get; set; } = true;
 
         // Web settings
         public string ServerBaseUrl { get; set; } = "http://localhost:3000";
         public string ClientBaseUrl { get; set; } = "http://localhost:3000";
+        public string AdminKey { get; set; } = string.Empty;
 
         // Visual settings
         public Vector4 BgColor { get; set; } = new(0.07f, 0.08f, 0.09f, 1.0f);
