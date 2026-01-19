@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "6a0qh/cNQZ8=",
+  "success": true,
+  "projectFilePath": "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\kyro_\\.nuget\\packages\\dalamudpackager\\14.0.1\\dalamudpackager.14.0.1.nupkg.sha512",
+    "C:\\Users\\kyro_\\.nuget\\packages\\dotnet.reproduciblebuilds\\1.2.39\\dotnet.reproduciblebuilds.1.2.39.nupkg.sha512"
+  ],
+  "logs": []
+}

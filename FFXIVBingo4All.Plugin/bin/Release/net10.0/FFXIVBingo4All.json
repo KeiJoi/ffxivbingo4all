@@ -1,0 +1,15 @@
+{
+  "Author": "FFXIVBingo4All",
+  "Name": "FFXIV Bingo 4 All",
+  "InternalName": "FFXIVBingo4All",
+  "AssemblyVersion": "0.1.0.0",
+  "Description": "Host relay plugin for multi-card bingo sessions.",
+  "ApplicableVersion": "any",
+  "DalamudApiLevel": 10,
+  "LoadRequiredState": 0,
+  "LoadSync": false,
+  "CanUnloadAsync": false,
+  "LoadPriority": 0,
+  "Punchline": "Bingo host relay and client management.",
+  "AcceptsFeedback": true
+}

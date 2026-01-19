@@ -1,0 +1,6 @@
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\net8.0\FFXIVBingo4All.Plugin.csproj.AssemblyReference.cache
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\net8.0\FFXIVBingo4All.Plugin.GeneratedMSBuildEditorConfig.editorconfig
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\net8.0\FFXIVBingo4All.Plugin.AssemblyInfoInputs.cache
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\net8.0\FFXIVBingo4All.Plugin.AssemblyInfo.cs
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\net8.0\FFXIVBingo4All.Plugin.csproj.CoreCompileInputs.cache
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\net8.0\FFXIVBingo4All.Plugin.sourcelink.json
