@@ -1,23 +1,26 @@
-{
-  "plugins": [
-    {
-      Author: "Kei Joi"
-      Name: "FFXIV Bingo 4 All",
-      InternalName: "FFXIVBingo4All",
-      AssemblyVersion: "0.1.0.0",
-      TestingAssemblyVersion: null,
-      RepoUrl: "https://github.com/KeiJoi/ffxivbingo4all",
-      ApplicableVersion: "any",
-      DalamudApiLevel: 14,
-      Punchline: "Bingo host relay and client management.",
-      IsHide: false,
-      IsTestingExclusive: false,
-      DownloadLinkInstall: "https://github.com/KeiJoi/ffxivbingo4all/raw/refs/heads/main/FFXIVBingo4all.zip",
-      DownloadLinkTesting: "https://github.com/KeiJoi/ffxivbingo4all/raw/refs/heads/main/FFXIVBingo4all.zip",
-      DownloadLinkUpdate: "https://github.com/KeiJoi/ffxivbingo4all/raw/refs/heads/main/FFXIVBingo4all.zip",
-      LastUpdate: 1705482000,
-      "IconUrl": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/refs/heads/main/icon.png"
-    }
-  ]
-}
- 
+[
+  {
+    "Author": "Kei Joi",
+    "Name": "FFXIV Bingo 4 All",
+    "InternalName": "FFXIVBingo4All",
+    "AssemblyVersion": "0.1.0.0",
+    "Description": "Host relay plugin for multi-card bingo.",
+    "ApplicableVersion": "any",
+    "RepoUrl": "https://github.com/KeiJoi/ffxivbingo4all",
+    "Tags": [
+      "bingo",
+      "minigame"
+    ],
+    "DalamudApiLevel": 11,
+    "LoadPriority": 0,
+    "IconUrl": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/icon.png",
+    "Punchline": "Bingo host relay and client management.",
+    "DownloadLinkInstall": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/FFXIVBingo4All.zip",
+    "DownloadLinkUpdate": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/FFXIVBingo4All.zip",
+    "DownloadLinkTesting": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/FFXIVBingo4All.zip",
+    "DownloadLinkTestingUpdate": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/FFXIVBingo4All.zip",
+    "IsHide": false,
+    "IsTestingExclusive": false,
+    "LastUpdate": 1705482000
+  }
+]
