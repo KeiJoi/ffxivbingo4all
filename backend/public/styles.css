@@ -1,17 +1,17 @@
 /* USER CONFIGURATION */
-/* Replace a specific number with an image. */
-.bingo-cell[data-number="42"] {
+/* Replace the free spot with a custom logo. */
+.bingo-cell[data-number="free"] {
   color: transparent;
-  background-image: url("images/number-42.png");
+  background-image: url("images/free-logo.png");
   background-repeat: no-repeat;
   background-position: center;
   background-size: contain;
 }
 
-/* Replace the free spot with a custom logo. */
-.bingo-cell[data-number="free"] {
+/* Replace the middle header letter with a paw. */
+.card-header .header-cell:nth-child(3) {
   color: transparent;
-  background-image: url("images/free-logo.png");
+  background-image: url("images/paw.png");
   background-repeat: no-repeat;
   background-position: center;
   background-size: contain;

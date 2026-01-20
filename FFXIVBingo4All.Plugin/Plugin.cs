@@ -1086,16 +1086,16 @@ namespace FFXIVBingo4All
             }
 
             var calledSet = new HashSet<int>(configuration.CalledNumbers);
+            var headerLetters = NormalizeLetters(configuration.CustomHeaderLetters);
             if (ImGui.BeginTable(
                 "called_grid",
                 5,
                 ImGuiTableFlags.Borders | ImGuiTableFlags.SizingFixedFit))
             {
-                ImGui.TableSetupColumn("B");
-                ImGui.TableSetupColumn("I");
-                ImGui.TableSetupColumn("N");
-                ImGui.TableSetupColumn("G");
-                ImGui.TableSetupColumn("O");
+                for (int col = 0; col < 5; col++)
+                {
+                    ImGui.TableSetupColumn(headerLetters[col].ToString());
+                }
                 ImGui.TableHeadersRow();
 
                 for (int row = 0; row < 15; row++)
@@ -1167,18 +1167,25 @@ namespace FFXIVBingo4All
 
         private static string NormalizeLetters(string value)
         {
+            const string fallback = "BINGO";
             if (string.IsNullOrWhiteSpace(value))
             {
-                return "BINGO";
+                return fallback;
             }
 
-            var trimmed = value.Trim();
-            if (trimmed.Length > 5)
+            var trimmed = value.Trim().ToUpperInvariant();
+            if (trimmed.Length >= 5)
             {
-                trimmed = trimmed.Substring(0, 5);
+                return trimmed.Substring(0, 5);
             }
 
-            return trimmed.ToUpperInvariant();
+            var letters = fallback.ToCharArray();
+            for (int i = 0; i < trimmed.Length; i++)
+            {
+                letters[i] = trimmed[i];
+            }
+
+            return new string(letters);
         }
 
         private string BuildClientUrl(string seed, int count, string letters, string? player)
@@ -1470,6 +1477,7 @@ namespace FFXIVBingo4All
         private void StopBingo()
         {
             configuration.BingoActive = false;
+            configuration.CurrentRoomCode = string.Empty;
             configuration.Save();
         }
 
