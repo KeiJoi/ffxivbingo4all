@@ -33,10 +33,14 @@
   --daub-text: #0c1116;
   --ball-color: #f3f3f3;
   --ball-text: #121417;
+  --card-grid-gap: 4px;
   --card-ball-size: 84px;
   --called-ball-size: calc(var(--card-ball-size) * 0.75);
   --card-ball-font: calc(var(--card-ball-size) * 0.4);
   --called-ball-font: calc(var(--called-ball-size) * 0.35);
+  --card-width: calc(
+    (var(--card-ball-size) * 5) + (var(--card-grid-gap) * 4) + 24px
+  );
 }
 
 * {
@@ -175,6 +179,7 @@ header h1 {
 .cards {
   display: grid;
   gap: 16px;
+  justify-items: center;
 }
 
 .cards.single {
@@ -182,12 +187,12 @@ header h1 {
 }
 
 .cards.multi {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(var(--card-width), 1fr));
 }
 
 @media (min-width: 900px) {
   .cards.multi {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(var(--card-width), 1fr));
   }
 }
 
@@ -198,14 +203,14 @@ header h1 {
   display: grid;
   gap: 8px;
   box-shadow: 0 12px 24px var(--card-shadow);
-  width: 100%;
-  max-width: 360px;
+  width: var(--card-width);
+  max-width: 100%;
 }
 
 .card-header {
   display: grid;
   grid-template-columns: repeat(5, var(--card-ball-size));
-  gap: 4px;
+  gap: var(--card-grid-gap);
   justify-content: center;
 }
 
@@ -223,7 +228,7 @@ header h1 {
 .grid {
   display: grid;
   grid-template-columns: repeat(5, var(--card-ball-size));
-  gap: 4px;
+  gap: var(--card-grid-gap);
   justify-content: center;
 }
 
