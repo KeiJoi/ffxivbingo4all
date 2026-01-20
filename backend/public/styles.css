@@ -145,9 +145,16 @@ header h1 {
 
 .called-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, var(--called-ball-size));
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.called-row {
+  display: grid;
+  grid-template-columns: repeat(16, var(--called-ball-size));
   gap: 4px;
-  justify-content: start;
+  width: max-content;
 }
 
 .called-number {
@@ -169,6 +176,13 @@ header h1 {
   color: var(--daub-text);
   border-color: transparent;
   cursor: pointer;
+}
+
+.called-header {
+  background: var(--header-bg);
+  color: var(--header-text);
+  font-weight: 700;
+  cursor: default;
 }
 
 .called-note {
@@ -313,7 +327,7 @@ header h1 {
   }
 
   .called-grid {
-    grid-template-columns: repeat(8, minmax(0, 1fr));
+    gap: 6px;
   }
 
   .cell {

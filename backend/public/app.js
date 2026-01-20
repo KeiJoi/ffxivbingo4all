@@ -454,20 +454,36 @@ function createCard(index) {
 }
 
 const calledGrid = document.getElementById("called-grid");
-for (let i = 1; i <= 75; i += 1) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "called-number";
-  button.dataset.number = String(i);
-  button.textContent = String(i);
-  button.addEventListener("click", () => {
-    if (!calledSet.has(String(i))) {
-      return;
+if (calledGrid) {
+  for (let col = 0; col < 5; col += 1) {
+    const row = document.createElement("div");
+    row.className = "called-row";
+
+    const headerBall = document.createElement("div");
+    headerBall.className = "called-number called-header";
+    headerBall.dataset.letter = headers[col];
+    headerBall.textContent = headers[col];
+    row.appendChild(headerBall);
+
+    for (let i = 1; i <= 15; i += 1) {
+      const value = (col * 15) + i;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "called-number";
+      button.dataset.number = String(value);
+      button.textContent = String(value);
+      button.addEventListener("click", () => {
+        if (!calledSet.has(String(value))) {
+          return;
+        }
+        toggleDaubForNumber(String(value));
+      });
+      calledButtons.set(String(value), button);
+      row.appendChild(button);
     }
-    toggleDaubForNumber(String(i));
-  });
-  calledButtons.set(String(i), button);
-  calledGrid.appendChild(button);
+
+    calledGrid.appendChild(row);
+  }
 }
 
 const cardsContainer = document.getElementById("cards");
