@@ -33,8 +33,8 @@
   --daub-text: #0c1116;
   --ball-color: #f3f3f3;
   --ball-text: #121417;
-  --card-ball-size: 42px;
-  --called-ball-size: calc(var(--card-ball-size) * 2);
+  --card-ball-size: 84px;
+  --called-ball-size: calc(var(--card-ball-size) * 0.75);
   --card-ball-font: calc(var(--card-ball-size) * 0.4);
   --called-ball-font: calc(var(--called-ball-size) * 0.35);
 }

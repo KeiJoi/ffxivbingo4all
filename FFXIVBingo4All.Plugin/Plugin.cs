@@ -1056,6 +1056,7 @@ namespace FFXIVBingo4All
                 ? configuration.CalledNumbers[^1]
                 : 0;
             bool hasLast = lastCalled > 0;
+            string lastLabel = FormatBallLabel(lastCalled, configuration.CustomHeaderLetters);
 
             ImGui.Text("Broadcast Command");
             ImGui.SameLine();
@@ -1064,11 +1065,11 @@ namespace FFXIVBingo4All
 
             ImGui.Text("Last Called");
             ImGui.SetWindowFontScale(1.6f);
-            if (ImGui.Button(hasLast ? lastCalled.ToString() : "--", new Vector2(120, 0)))
+            if (ImGui.Button(hasLast ? lastLabel : "--", new Vector2(140, 0)))
             {
                 if (hasLast)
                 {
-                    string command = $"{BroadcastCommands[broadcastCommandIndex]} {lastCalled}";
+                    string command = $"{BroadcastCommands[broadcastCommandIndex]} {lastLabel}";
                     ImGui.SetClipboardText(command);
                     broadcastCopyStatus = $"Copied: {command}";
                 }
@@ -1248,6 +1249,19 @@ namespace FFXIVBingo4All
         {
             var separator = url.Contains("?") ? "&" : "?";
             return $"{url}{separator}{key}={Uri.EscapeDataString(value)}";
+        }
+
+        private static string FormatBallLabel(int number, string letters)
+        {
+            if (number < 1 || number > 75)
+            {
+                return "--";
+            }
+
+            var normalized = NormalizeLetters(letters);
+            int index = (number - 1) / 15;
+            char letter = normalized[index];
+            return $"{letter} - {number}";
         }
 
         private string BuildSkinQueryString()
