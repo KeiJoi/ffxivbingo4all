@@ -12,11 +12,11 @@
       Punchline: "Bingo host relay and client management.",
       IsHide: false,
       IsTestingExclusive: false,
-      DownloadLinkInstall: "https://github.com/KeiJoi/ffxivbingo4all/FFXIVBingo4All.zip",
-      DownloadLinkTesting: "https://github.com/KeiJoi/ffxivbingo4all/FFXIVBingo4All.zip",
-      DownloadLinkUpdate: "https://github.com/KeiJoi/ffxivbingo4all/FFXIVBingo4All.zip",
-      LastUpdate: "2024-01-01T00:00:00Z",
-      "IconUrl": "https://github.com/KeiJoi/ffxivbingo4all/icon.png"
+      DownloadLinkInstall: "https://github.com/KeiJoi/ffxivbingo4all/raw/refs/heads/main/FFXIVBingo4all.zip",
+      DownloadLinkTesting: "https://github.com/KeiJoi/ffxivbingo4all/raw/refs/heads/main/FFXIVBingo4all.zip",
+      DownloadLinkUpdate: "https://github.com/KeiJoi/ffxivbingo4all/raw/refs/heads/main/FFXIVBingo4all.zip",
+      LastUpdate: 1705482000,
+      "IconUrl": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/refs/heads/main/icon.png"
     }
   ]
 }
