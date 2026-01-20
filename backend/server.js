@@ -20,6 +20,37 @@ function touchSession(session) {
   session.updatedAt = Date.now();
 }
 
+function normalizeAllowedCards(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+
+  const result = {};
+  Object.entries(raw).forEach(([seed, count]) => {
+    if (typeof seed !== "string") {
+      return;
+    }
+    const trimmed = seed.trim();
+    if (!trimmed) {
+      return;
+    }
+    const parsed = Number(count);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      return;
+    }
+    result[trimmed] = Math.min(parsed, 16);
+  });
+
+  return result;
+}
+
+function getAllowedSeeds(session) {
+  if (session.allowedCards && Object.keys(session.allowedCards).length > 0) {
+    return Object.keys(session.allowedCards);
+  }
+  return Array.isArray(session.allowedSeeds) ? session.allowedSeeds : [];
+}
+
 function isAdminRequest(req) {
   const headerKey = req.get("x-admin-key");
   const queryKey = req.query?.key;
@@ -32,8 +63,10 @@ function getSession(roomCode) {
     games[roomCode] = {
       calledNumbers: [],
       allowedSeeds: [],
+      allowedCards: {},
       daubs: {},
       lastBingo: null,
+      bingoCalls: [],
       gameType: "Single Line",
       updatedAt: Date.now(),
     };
@@ -42,7 +75,8 @@ function getSession(roomCode) {
 }
 
 app.post("/api/host-sync", (req, res) => {
-  const { roomCode, calledNumbers, allowedSeeds, gameType } = req.body || {};
+  const { roomCode, calledNumbers, allowedSeeds, allowedCards, gameType } =
+    req.body || {};
   console.log("api_host_sync", req.body);
 
   if (!roomCode) {
@@ -53,19 +87,25 @@ app.post("/api/host-sync", (req, res) => {
   session.calledNumbers = Array.isArray(calledNumbers)
     ? calledNumbers.slice()
     : [];
-  if (Array.isArray(allowedSeeds)) {
+  const normalizedCards = normalizeAllowedCards(allowedCards);
+  if (normalizedCards !== null) {
+    session.allowedCards = normalizedCards;
+    session.allowedSeeds = Object.keys(normalizedCards);
+  } else if (Array.isArray(allowedSeeds)) {
     const cleaned = allowedSeeds
       .filter((seed) => typeof seed === "string")
       .map((seed) => seed.trim())
       .filter((seed) => seed.length > 0);
     session.allowedSeeds = Array.from(new Set(cleaned));
-    const allowedSet = new Set(session.allowedSeeds);
-    Object.keys(session.daubs).forEach((seed) => {
-      if (!allowedSet.has(seed)) {
-        delete session.daubs[seed];
-      }
-    });
+    session.allowedCards = {};
   }
+
+  const allowedSet = new Set(session.allowedSeeds);
+  Object.keys(session.daubs).forEach((seed) => {
+    if (!allowedSet.has(seed)) {
+      delete session.daubs[seed];
+    }
+  });
   if (typeof gameType === "string" && gameType.trim().length > 0) {
     session.gameType = gameType.trim();
   }
@@ -80,6 +120,7 @@ app.post("/api/host-sync", (req, res) => {
     ok: true,
     calledNumbers: session.calledNumbers,
     allowedSeeds: session.allowedSeeds,
+    allowedCards: session.allowedCards,
     gameType: session.gameType,
   });
 });
@@ -96,8 +137,14 @@ app.get("/api/admin/rooms", (req, res) => {
       roomCode,
       calledNumbersCount: session.calledNumbers.length,
       allowedSeedsCount: session.allowedSeeds.length,
+      allowedCardsCount: session.allowedCards
+        ? Object.keys(session.allowedCards).length
+        : 0,
       daubPlayers,
       lastBingo: session.lastBingo,
+      bingoCallsCount: Array.isArray(session.bingoCalls)
+        ? session.bingoCalls.length
+        : 0,
       gameType: session.gameType,
       updatedAt: session.updatedAt || null,
     };
@@ -148,8 +195,10 @@ app.get("/api/room-state", (req, res) => {
     roomCode,
     calledNumbers: session.calledNumbers,
     allowedSeeds: session.allowedSeeds,
+    allowedCards: session.allowedCards,
     daubs: session.daubs,
     lastBingo: session.lastBingo,
+    bingoCalls: Array.isArray(session.bingoCalls) ? session.bingoCalls : [],
     gameType: session.gameType,
   });
 });
@@ -197,18 +246,19 @@ io.on("connection", (socket) => {
         roomCode,
         calledNumbers: [],
         allowedSeeds: [],
+        allowedCards: {},
+        bingoCalls: [],
         enforceSeeds: false,
       });
       return;
     }
 
     const session = getSession(roomCode);
-    const enforceSeeds = Array.isArray(session.allowedSeeds)
-      ? session.allowedSeeds.length > 0
-      : false;
+    const allowedSeeds = getAllowedSeeds(session);
+    const enforceSeeds = allowedSeeds.length > 0;
 
     if (enforceSeeds) {
-      if (typeof seed !== "string" || !session.allowedSeeds.includes(seed)) {
+      if (typeof seed !== "string" || !allowedSeeds.includes(seed)) {
         console.log("cheat_detected", { socketId: socket.id, roomCode, seed });
         socket.emit("cheat_detected", { reason: "invalid_seed" });
         return;
@@ -220,12 +270,14 @@ io.on("connection", (socket) => {
       socketId: socket.id,
       roomCode,
       calledNumbers: session.calledNumbers,
-      allowedSeedsCount: session.allowedSeeds.length,
+      allowedSeedsCount: allowedSeeds.length,
     });
     socket.emit("init_state", {
       roomCode,
       calledNumbers: session.calledNumbers,
-      allowedSeeds: session.allowedSeeds,
+      allowedSeeds,
+      allowedCards: session.allowedCards,
+      bingoCalls: Array.isArray(session.bingoCalls) ? session.bingoCalls : [],
       enforceSeeds,
       gameType: session.gameType,
     });
@@ -240,10 +292,10 @@ io.on("connection", (socket) => {
     }
 
     const session = getSession(roomCode);
+    const allowedSeeds = getAllowedSeeds(session);
     if (
-      Array.isArray(session.allowedSeeds) &&
-      session.allowedSeeds.length > 0 &&
-      (typeof seed !== "string" || !session.allowedSeeds.includes(seed))
+      allowedSeeds.length > 0 &&
+      (typeof seed !== "string" || !allowedSeeds.includes(seed))
     ) {
       console.log("bingo_blocked_invalid_seed", {
         socketId: socket.id,
@@ -264,6 +316,14 @@ io.on("connection", (socket) => {
       seed: typeof seed === "string" ? seed : null,
       timestamp: Date.now(),
     };
+    if (!Array.isArray(session.bingoCalls)) {
+      session.bingoCalls = [];
+    }
+    session.bingoCalls.push({
+      name: caller,
+      seed: typeof seed === "string" ? seed : null,
+      timestamp: Date.now(),
+    });
     touchSession(session);
 
     io.to(roomCode).emit("bingo_called", {
@@ -280,10 +340,10 @@ io.on("connection", (socket) => {
     }
 
     const session = getSession(roomCode);
+    const allowedSeeds = getAllowedSeeds(session);
     if (
-      Array.isArray(session.allowedSeeds) &&
-      session.allowedSeeds.length > 0 &&
-      (typeof seed !== "string" || !session.allowedSeeds.includes(seed))
+      allowedSeeds.length > 0 &&
+      (typeof seed !== "string" || !allowedSeeds.includes(seed))
     ) {
       console.log("daub_blocked_invalid_seed", {
         socketId: socket.id,

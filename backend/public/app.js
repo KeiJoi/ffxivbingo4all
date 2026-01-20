@@ -2,17 +2,27 @@ const params = new URLSearchParams(window.location.search);
 const hasSeed = params.has("seed");
 const hasCount = params.has("count");
 const masterSeed = params.get("seed") || "default-seed";
-const countParam = parseInt(params.get("count"), 10);
+const countRaw = params.get("count");
+const countParam = countRaw === null ? Number.NaN : Number(countRaw);
+const countValid =
+  !hasCount &&
+  !hasSeed
+    ? true
+    : hasCount &&
+      Number.isInteger(countParam) &&
+      countParam >= 1 &&
+      countParam <= 16;
 const count =
   hasSeed || hasCount
-    ? Number.isFinite(countParam)
-      ? Math.min(Math.max(countParam, 1), 16)
-      : 1
+    ? countValid
+      ? countParam
+      : 0
     : 0;
 const lettersParam = params.get("letters") || "BINGO";
 const playerParam = params.get("player") || params.get("name") || "";
 const titleParam = params.get("title") || "";
 const gameParam = params.get("game") || params.get("type") || "";
+let linkBlocked = false;
 
 function normalizeHex(value) {
   if (!value) {
@@ -48,6 +58,7 @@ const calledSet = new Set();
 const calledButtons = new Map();
 const bingoCallButton = document.getElementById("bingo-call");
 const bingoBanner = document.getElementById("bingo-banner");
+const bingoListEl = document.getElementById("bingo-list");
 const playerNameEl = document.getElementById("player-name");
 const pageTitleEl = document.querySelector("header h1");
 const roomCode = params.get("room") || masterSeed;
@@ -55,7 +66,9 @@ let socket = null;
 let hasBingo = false;
 let isConnected = false;
 let enforceSeeds = false;
+let pageInitialized = false;
 const cardMatrices = [];
+const bingoCalls = [];
 const gameTypes = ["Single Line", "Two Lines", "Four Corners", "Blackout"];
 let currentGameType = normalizeGameType(gameParam) || "Single Line";
 
@@ -86,6 +99,49 @@ function setBingoBanner(message) {
   bingoBanner.classList.toggle("active", Boolean(message));
 }
 
+function formatBingoCall(entry) {
+  const name =
+    entry && typeof entry.name === "string" && entry.name.trim().length > 0
+      ? entry.name.trim()
+      : "Unknown";
+  if (entry && entry.timestamp) {
+    const time = new Date(entry.timestamp).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    return `${name} @ ${time}`;
+  }
+  return name;
+}
+
+function renderBingoCalls() {
+  if (!bingoListEl) {
+    return;
+  }
+  bingoListEl.innerHTML = "";
+  if (bingoCalls.length === 0) {
+    return;
+  }
+  bingoCalls.forEach((call) => {
+    const entry = document.createElement("div");
+    entry.className = "bingo-entry";
+    entry.textContent = formatBingoCall(call);
+    bingoListEl.appendChild(entry);
+  });
+}
+
+function recordBingoCall(call) {
+  if (!call) {
+    return;
+  }
+  bingoCalls.push({
+    name: call.name,
+    timestamp: call.timestamp,
+  });
+  renderBingoCalls();
+}
+
 function normalizeGameType(value) {
   const trimmed = (value || "").trim().toLowerCase();
   if (!trimmed) {
@@ -97,6 +153,29 @@ function normalizeGameType(value) {
     }
   }
   return "";
+}
+
+function isValidLetters(value) {
+  if (!value) {
+    return false;
+  }
+  const cleaned = value
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .join("");
+  return cleaned.length >= 1 && cleaned.length <= 5;
+}
+
+function isValidHttpUrl(value) {
+  if (!value) {
+    return false;
+  }
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch (err) {
+    return false;
+  }
 }
 
 function showBlockingMessage(title, message) {
@@ -123,11 +202,63 @@ function showMissingCardsMessage() {
   );
 }
 
+function showInvalidLinkMessage(details) {
+  showBlockingMessage(
+    "INVALID LINK",
+    details || "This link is missing or has invalid parameters."
+  );
+}
+
 function showServerUnreachableMessage() {
   showBlockingMessage(
     "SERVER UNREACHABLE",
     "The bingo server could not be reached. Check the server URL and try again."
   );
+}
+
+function validateLinkParams() {
+  if (params.size === 0) {
+    return { ok: true };
+  }
+
+  const errors = [];
+  if (!hasSeed || !masterSeed.trim()) {
+    errors.push("Missing seed.");
+  }
+  if (!hasCount) {
+    errors.push("Missing count.");
+  } else if (!countValid) {
+    errors.push("Count must be 1-16.");
+  }
+
+  if (params.has("letters") && !isValidLetters(lettersParam)) {
+    errors.push("Letters must be 1-5 characters.");
+  }
+
+  const colorParams = ["bg", "card", "header", "text", "daub", "ball"];
+  colorParams.forEach((paramName) => {
+    if (params.has(paramName) && !normalizeHex(params.get(paramName))) {
+      errors.push(`Invalid ${paramName} color.`);
+    }
+  });
+
+  if (params.has("server") && !isValidHttpUrl(params.get("server"))) {
+    errors.push("Invalid server URL.");
+  }
+
+  if (params.has("room") && !String(params.get("room")).trim()) {
+    errors.push("Invalid room.");
+  }
+
+  if ((params.has("game") || params.has("type")) && !normalizeGameType(gameParam)) {
+    errors.push("Invalid game type.");
+  }
+
+  if (errors.length === 0) {
+    return { ok: true };
+  }
+
+  return { ok: false, message: errors.join(" ") };
 }
 
 function updateBingoButtonState() {
@@ -173,6 +304,12 @@ const headers = (() => {
   return result;
 })();
 
+const linkValidation = validateLinkParams();
+if (!linkValidation.ok) {
+  showInvalidLinkMessage(linkValidation.message);
+  linkBlocked = true;
+}
+
 async function verifyRoomAvailability(serverUrl, room) {
   const normalized = serverUrl.replace(/\/+$/, "");
   const controller = new AbortController();
@@ -185,7 +322,13 @@ async function verifyRoomAvailability(serverUrl, room) {
       { signal: controller.signal }
     );
     if (response.ok) {
-      return { ok: true };
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (err) {
+        console.log("room_state_parse_failed", err);
+      }
+      return { ok: true, allowedCards: data && data.allowedCards };
     }
     if (response.status === 404) {
       return { ok: false, reason: "missing" };
@@ -453,46 +596,57 @@ function createCard(index) {
   return card;
 }
 
-const calledGrid = document.getElementById("called-grid");
-if (calledGrid) {
-  for (let col = 0; col < 5; col += 1) {
-    const row = document.createElement("div");
-    row.className = "called-row";
+function initializePage() {
+  if (pageInitialized) {
+    return;
+  }
+  pageInitialized = true;
 
-    for (let i = 1; i <= 15; i += 1) {
-      const value = (col * 15) + i;
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "called-number";
-      button.dataset.number = String(value);
-      button.textContent = String(value);
-      button.addEventListener("click", () => {
-        if (!calledSet.has(String(value))) {
-          return;
-        }
-        toggleDaubForNumber(String(value));
-      });
-      calledButtons.set(String(value), button);
-      row.appendChild(button);
+  const calledGrid = document.getElementById("called-grid");
+  if (calledGrid) {
+    for (let col = 0; col < 5; col += 1) {
+      const row = document.createElement("div");
+      row.className = "called-row";
+
+      for (let i = 1; i <= 15; i += 1) {
+        const value = (col * 15) + i;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "called-number";
+        button.dataset.number = String(value);
+        button.textContent = String(value);
+        button.addEventListener("click", () => {
+          if (!calledSet.has(String(value))) {
+            return;
+          }
+          toggleDaubForNumber(String(value));
+        });
+        calledButtons.set(String(value), button);
+        row.appendChild(button);
+      }
+
+      calledGrid.appendChild(row);
     }
+  }
 
-    calledGrid.appendChild(row);
+  const cardsContainer = document.getElementById("cards");
+  if (cardsContainer) {
+    cardsContainer.classList.toggle("single", count === 1);
+    cardsContainer.classList.toggle("multi", count > 1);
+    for (let i = 0; i < count; i += 1) {
+      cardsContainer.appendChild(createCard(i));
+    }
+  }
+  updateBingoState();
+
+  const meta = document.getElementById("meta");
+  if (meta) {
+    meta.textContent =
+      count > 0
+        ? `Seed ${masterSeed} - Cards ${count}`
+        : "Add ?seed=ROOM&count=1 to generate cards.";
   }
 }
-
-const cardsContainer = document.getElementById("cards");
-cardsContainer.classList.toggle("single", count === 1);
-cardsContainer.classList.toggle("multi", count > 1);
-for (let i = 0; i < count; i += 1) {
-  cardsContainer.appendChild(createCard(i));
-}
-updateBingoState();
-
-const meta = document.getElementById("meta");
-meta.textContent =
-  count > 0
-    ? `Seed ${masterSeed} - Cards ${count}`
-    : "Add ?seed=ROOM&count=1 to generate cards.";
 
 function connectSocket(serverUrl) {
   socket = io(serverUrl);
@@ -534,7 +688,13 @@ function connectSocket(serverUrl) {
 
   socket.on("init_state", (payload) => {
     console.log("init_state", payload);
-    const allowedSeeds = (payload && payload.allowedSeeds) || [];
+    const allowedCards =
+      payload && payload.allowedCards && typeof payload.allowedCards === "object"
+        ? payload.allowedCards
+        : null;
+    const allowedSeeds = allowedCards
+      ? Object.keys(allowedCards)
+      : (payload && payload.allowedSeeds) || [];
     enforceSeeds =
       Boolean(payload && payload.enforceSeeds) || allowedSeeds.length > 0;
     if (payload && payload.gameType) {
@@ -546,6 +706,31 @@ function connectSocket(serverUrl) {
         socket.disconnect();
       }
       return;
+    }
+    if (
+      allowedCards &&
+      Object.prototype.hasOwnProperty.call(allowedCards, masterSeed)
+    ) {
+      const allowedCount = Number(allowedCards[masterSeed]);
+      if (Number.isFinite(allowedCount) && count > allowedCount) {
+        showInvalidLinkMessage("Count exceeds allowed cards for this seed.");
+        if (socket) {
+          socket.disconnect();
+        }
+        return;
+      }
+    }
+    if (Array.isArray(payload && payload.bingoCalls)) {
+      bingoCalls.length = 0;
+      payload.bingoCalls.forEach((call) => {
+        if (call && typeof call === "object") {
+          bingoCalls.push({
+            name: call.name,
+            timestamp: call.timestamp,
+          });
+        }
+      });
+      renderBingoCalls();
     }
     const called = (payload && payload.calledNumbers) || [];
     called.forEach((value) => {
@@ -566,6 +751,7 @@ function connectSocket(serverUrl) {
     console.log("bingo_called", payload);
     const caller = payload && payload.name ? payload.name : "Unknown";
     setBingoBanner(`BINGO called by ${caller}!`);
+    recordBingoCall(payload);
   });
 
   socket.on("cheat_detected", (payload) => {
@@ -580,20 +766,45 @@ function connectSocket(serverUrl) {
   });
 }
 
-if (count > 0) {
-  const defaultServerUrl = window.location.origin;
-  const serverUrl = params.get("server") || defaultServerUrl;
+if (!linkBlocked) {
+  if (count > 0) {
+    const defaultServerUrl = window.location.origin;
+    const serverUrl = params.get("server") || defaultServerUrl;
 
-  verifyRoomAvailability(serverUrl, roomCode).then((result) => {
-    if (!result.ok) {
-      if (result.reason === "missing") {
-        showMissingCardsMessage();
-      } else {
-        showServerUnreachableMessage();
+    verifyRoomAvailability(serverUrl, roomCode).then((result) => {
+      if (!result.ok) {
+        if (result.reason === "missing") {
+          showMissingCardsMessage();
+        } else {
+          showServerUnreachableMessage();
+        }
+        return;
       }
-      return;
-    }
 
-    connectSocket(serverUrl);
-  });
+      if (result.allowedCards && typeof result.allowedCards === "object") {
+        const allowedKeys = Object.keys(result.allowedCards);
+        if (allowedKeys.length > 0) {
+          if (
+            !Object.prototype.hasOwnProperty.call(
+              result.allowedCards,
+              masterSeed
+            )
+          ) {
+            showMissingCardsMessage();
+            return;
+          }
+          const allowedCount = Number(result.allowedCards[masterSeed]);
+          if (Number.isFinite(allowedCount) && count > allowedCount) {
+            showInvalidLinkMessage("Count exceeds allowed cards for this seed.");
+            return;
+          }
+        }
+      }
+
+      initializePage();
+      connectSocket(serverUrl);
+    });
+  } else {
+    initializePage();
+  }
 }

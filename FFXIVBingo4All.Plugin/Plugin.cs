@@ -150,13 +150,14 @@ namespace FFXIVBingo4All
             {
                 return;
             }
+            if (!text.Contains("You roll", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
             var match = RollRegex.Match(text);
             if (!match.Success)
             {
-                if (text.Contains("roll", StringComparison.OrdinalIgnoreCase))
-                {
-                    DebugChat($"Roll parse miss: \"{text}\"");
-                }
+                DebugChat($"Roll parse miss: \"{text}\"");
                 return;
             }
 
@@ -252,6 +253,9 @@ namespace FFXIVBingo4All
                 roomCode = configuration.CurrentRoomCode,
                 calledNumbers = configuration.CalledNumbers,
                 allowedSeeds = configuration.IssuedCards.Keys.ToList(),
+                allowedCards = configuration.IssuedCards.ToDictionary(
+                    entry => entry.Key,
+                    entry => Math.Clamp(entry.Value.CardCount, 1, 16)),
                 gameType = configuration.GameType,
             };
 
@@ -510,14 +514,16 @@ namespace FFXIVBingo4All
                     configuration.CurrentRoomCode = Guid.NewGuid().ToString();
                 }
 
+                var displayName = playerName.Trim();
+                var ledgerName = NormalizePlayerName(displayName);
                 var seed = Guid.NewGuid().ToString();
                 var letters = NormalizeLetters(configuration.CustomHeaderLetters);
-                generatedLink = BuildClientUrl(seed, playerCardCount, letters, playerName.Trim());
+                generatedLink = BuildClientUrl(seed, playerCardCount, letters, displayName);
 
-                RemoveIssuedCardsForPlayer(playerName);
+                RemoveIssuedCardsForPlayer(ledgerName);
                 configuration.IssuedCards[seed] = new PlayerData
                 {
-                    PlayerName = playerName.Trim(),
+                    PlayerName = ledgerName,
                     CardCount = playerCardCount,
                 };
                 configuration.Save();
@@ -1133,13 +1139,13 @@ namespace FFXIVBingo4All
         {
             foreach (var update in updates)
             {
-                configuration.IssuedCards.Remove(update.oldSeed);
+                RemoveIssuedCardsForPlayer(update.playerName);
                 if (update.newCount > 0)
                 {
                     var newSeed = Guid.NewGuid().ToString();
                     configuration.IssuedCards[newSeed] = new PlayerData
                     {
-                        PlayerName = update.playerName,
+                        PlayerName = NormalizePlayerName(update.playerName),
                         CardCount = update.newCount,
                     };
                 }
@@ -1148,14 +1154,13 @@ namespace FFXIVBingo4All
 
         private void RemoveIssuedCardsForPlayer(string name)
         {
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                return;
-            }
-
-            var trimmed = name.Trim();
+            var trimmed = NormalizePlayerName(name);
             var toRemove = configuration.IssuedCards
-                .Where(entry => string.Equals(entry.Value.PlayerName, trimmed, StringComparison.OrdinalIgnoreCase))
+                .Where(entry =>
+                    string.Equals(
+                        NormalizePlayerName(entry.Value.PlayerName),
+                        trimmed,
+                        StringComparison.OrdinalIgnoreCase))
                 .Select(entry => entry.Key)
                 .ToList();
 
@@ -1163,6 +1168,12 @@ namespace FFXIVBingo4All
             {
                 configuration.IssuedCards.Remove(seed);
             }
+        }
+
+        private static string NormalizePlayerName(string? name)
+        {
+            var trimmed = (name ?? string.Empty).Trim();
+            return string.IsNullOrEmpty(trimmed) ? "Guest" : trimmed;
         }
 
         private static string NormalizeLetters(string value)

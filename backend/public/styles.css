@@ -34,13 +34,10 @@
   --ball-color: #f3f3f3;
   --ball-text: #121417;
   --card-grid-gap: 4px;
-  --card-ball-size: 84px;
+  --card-ball-size: clamp(24px, 5.2vmin, 84px);
   --called-ball-size: calc(var(--card-ball-size) * 0.75);
-  --card-ball-font: calc(var(--card-ball-size) * 0.4);
-  --called-ball-font: calc(var(--called-ball-size) * 0.35);
-  --card-width: calc(
-    (var(--card-ball-size) * 5) + (var(--card-grid-gap) * 4) + 24px
-  );
+  --card-ball-font: clamp(12px, 2.4vmin, 28px);
+  --called-ball-font: clamp(12px, 2.2vmin, 24px);
 }
 
 * {
@@ -143,6 +140,17 @@ header h1 {
   padding: 6px 8px;
 }
 
+.bingo-list {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.bingo-entry {
+  padding: 2px 0;
+}
+
 .called-grid {
   display: grid;
   gap: 8px;
@@ -190,19 +198,21 @@ header h1 {
   display: grid;
   gap: 16px;
   justify-items: center;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .cards.single {
   justify-items: center;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .cards.multi {
-  grid-template-columns: repeat(auto-fit, minmax(var(--card-width), 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 @media (min-width: 900px) {
   .cards.multi {
-    grid-template-columns: repeat(auto-fit, minmax(var(--card-width), 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
@@ -213,13 +223,13 @@ header h1 {
   display: grid;
   gap: 8px;
   box-shadow: 0 12px 24px var(--card-shadow);
-  width: var(--card-width);
+  width: 100%;
   max-width: 100%;
 }
 
 .card-header {
   display: grid;
-  grid-template-columns: repeat(5, var(--card-ball-size));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--card-grid-gap);
   justify-content: center;
 }
@@ -237,7 +247,7 @@ header h1 {
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(5, var(--card-ball-size));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--card-grid-gap);
   justify-content: center;
 }
@@ -247,8 +257,8 @@ header h1 {
   border: 2px solid rgba(0, 0, 0, 0.15);
   color: var(--ball-text);
   border-radius: 999px;
-  width: var(--card-ball-size);
-  height: var(--card-ball-size);
+  width: 100%;
+  aspect-ratio: 1 / 1;
   display: grid;
   place-items: center;
   font-size: var(--card-ball-font);
@@ -312,10 +322,6 @@ header h1 {
   header {
     flex-direction: column;
     align-items: flex-start;
-  }
-
-  :root {
-    --card-ball-size: 36px;
   }
 
   .meta {
