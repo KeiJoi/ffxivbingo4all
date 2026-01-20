@@ -1,0 +1,26 @@
+[
+  {
+    "Author": "Kei Joi",
+    "Name": "FFXIV Bingo 4 All",
+    "InternalName": "FFXIVBingo4All",
+    "AssemblyVersion": "0.1.0.0",
+    "Description": "Host relay plugin for multi-card bingo.",
+    "ApplicableVersion": "any",
+    "RepoUrl": "https://github.com/KeiJoi/ffxivbingo4all",
+    "Tags": [
+      "bingo",
+      "minigame"
+    ],
+    "DalamudApiLevel": 11,
+    "LoadPriority": 0,
+    "IconUrl": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/icon.png",
+    "Punchline": "Bingo host relay and client management.",
+    "DownloadLinkInstall": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/FFXIVBingo4All.zip?v=2",
+    "DownloadLinkUpdate": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/FFXIVBingo4All.zip?v=2",
+    "DownloadLinkTesting": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/FFXIVBingo4All.zip?v=2",
+    "DownloadLinkTestingUpdate": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/FFXIVBingo4All.zip?v=2",
+    "IsHide": false,
+    "IsTestingExclusive": false,
+    "LastUpdate": 1705482000
+  }
+]
