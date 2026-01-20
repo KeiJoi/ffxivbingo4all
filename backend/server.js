@@ -131,7 +131,18 @@ app.get("/api/room-state", (req, res) => {
     return res.status(400).json({ error: "roomCode required" });
   }
 
-  const session = getSession(roomCode);
+  const requireExisting = String(req.query?.requireExisting || "")
+    .trim()
+    .toLowerCase();
+  const mustExist =
+    requireExisting === "1" ||
+    requireExisting === "true" ||
+    requireExisting === "yes";
+  if (mustExist && !games[roomCode]) {
+    return res.status(404).json({ error: "room_not_found" });
+  }
+
+  const session = games[roomCode] || getSession(roomCode);
   return res.json({
     ok: true,
     roomCode,

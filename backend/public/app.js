@@ -99,14 +99,35 @@ function normalizeGameType(value) {
   return "";
 }
 
-function showCheatMessage() {
+function showBlockingMessage(title, message) {
   document.body.classList.add("cheater");
   document.body.innerHTML = `
     <div class="cheat-screen">
-      <h2>YOU ARE CHEATING!</h2>
-      <p>This card hash is not registered for the current room.</p>
+      <h2>${title}</h2>
+      <p>${message}</p>
     </div>
   `;
+}
+
+function showCheatMessage() {
+  showBlockingMessage(
+    "YOU ARE CHEATING!",
+    "This card hash is not registered for the current room."
+  );
+}
+
+function showMissingCardsMessage() {
+  showBlockingMessage(
+    "CARDS DON'T EXIST",
+    "The seed you used is not registered for this room."
+  );
+}
+
+function showServerUnreachableMessage() {
+  showBlockingMessage(
+    "SERVER UNREACHABLE",
+    "The bingo server could not be reached. Check the server URL and try again."
+  );
 }
 
 function updateBingoButtonState() {
@@ -151,6 +172,32 @@ const headers = (() => {
   }
   return result;
 })();
+
+async function verifyRoomAvailability(serverUrl, room) {
+  const normalized = serverUrl.replace(/\/+$/, "");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6000);
+  try {
+    const response = await fetch(
+      `${normalized}/api/room-state?roomCode=${encodeURIComponent(
+        room
+      )}&requireExisting=1`,
+      { signal: controller.signal }
+    );
+    if (response.ok) {
+      return { ok: true };
+    }
+    if (response.status === 404) {
+      return { ok: false, reason: "missing" };
+    }
+    return { ok: false, reason: "unreachable" };
+  } catch (err) {
+    console.log("room_check_failed", err);
+    return { ok: false, reason: "unreachable" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function hashSeed(seed) {
   let h = 2166136261;
@@ -437,9 +484,7 @@ meta.textContent =
     ? `Seed ${masterSeed} - Cards ${count}`
     : "Add ?seed=ROOM&count=1 to generate cards.";
 
-if (count > 0) {
-  const defaultServerUrl = window.location.origin;
-  const serverUrl = params.get("server") || defaultServerUrl;
+function connectSocket(serverUrl) {
   socket = io(serverUrl);
 
   socket.on("connect", () => {
@@ -447,6 +492,14 @@ if (count > 0) {
     socket.emit("join_room", { roomCode, seed: masterSeed });
     isConnected = true;
     updateBingoButtonState();
+  });
+
+  socket.on("connect_error", (err) => {
+    console.log("socket_connect_error", err);
+    showServerUnreachableMessage();
+    if (socket) {
+      socket.disconnect();
+    }
   });
 
   socket.on("disconnect", (reason) => {
@@ -478,7 +531,7 @@ if (count > 0) {
       currentGameType = normalizeGameType(payload.gameType) || currentGameType;
     }
     if (enforceSeeds && !allowedSeeds.includes(masterSeed)) {
-      showCheatMessage();
+      showMissingCardsMessage();
       if (socket) {
         socket.disconnect();
       }
@@ -505,10 +558,32 @@ if (count > 0) {
     setBingoBanner(`BINGO called by ${caller}!`);
   });
 
-  socket.on("cheat_detected", () => {
-    showCheatMessage();
+  socket.on("cheat_detected", (payload) => {
+    if (payload && payload.reason === "invalid_seed") {
+      showMissingCardsMessage();
+    } else {
+      showCheatMessage();
+    }
     if (socket) {
       socket.disconnect();
     }
+  });
+}
+
+if (count > 0) {
+  const defaultServerUrl = window.location.origin;
+  const serverUrl = params.get("server") || defaultServerUrl;
+
+  verifyRoomAvailability(serverUrl, roomCode).then((result) => {
+    if (!result.ok) {
+      if (result.reason === "missing") {
+        showMissingCardsMessage();
+      } else {
+        showServerUnreachableMessage();
+      }
+      return;
+    }
+
+    connectSocket(serverUrl);
   });
 }
