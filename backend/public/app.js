@@ -59,6 +59,7 @@ const calledButtons = new Map();
 const bingoCallButton = document.getElementById("bingo-call");
 const bingoBanner = document.getElementById("bingo-banner");
 const bingoListEl = document.getElementById("bingo-list");
+const potDisplayEl = document.getElementById("pot-display");
 const playerNameEl = document.getElementById("player-name");
 const pageTitleEl = document.querySelector("header h1");
 const roomCode = params.get("room") || masterSeed;
@@ -140,6 +141,25 @@ function recordBingoCall(call) {
     timestamp: call.timestamp,
   });
   renderBingoCalls();
+}
+
+function renderPrizePot(totalCards, costPerCard, startingPot, prizePercentage) {
+  if (!potDisplayEl) {
+    return;
+  }
+  if (
+    !Number.isFinite(totalCards) ||
+    !Number.isFinite(costPerCard) ||
+    !Number.isFinite(startingPot) ||
+    !Number.isFinite(prizePercentage)
+  ) {
+    potDisplayEl.textContent = "";
+    return;
+  }
+
+  const pot = Math.max(0, startingPot) + Math.max(0, costPerCard) * totalCards;
+  const prize = Math.round(pot * (Math.max(prizePercentage, 0) / 100));
+  potDisplayEl.textContent = `Prize Pool: ${prize} (Pot: ${pot})`;
 }
 
 function normalizeGameType(value) {
@@ -405,6 +425,28 @@ function generateCard(seed) {
 function setDaubed(cell, next) {
   cell.classList.toggle("daubed", next);
   cell.setAttribute("aria-pressed", String(next));
+}
+
+function applyDaubs(seed, daubs) {
+  if (!seed || !daubs || typeof daubs !== "object") {
+    return;
+  }
+  const cardMap = daubs[seed];
+  if (!cardMap || typeof cardMap !== "object") {
+    return;
+  }
+  Object.keys(cardMap).forEach((cardIndex) => {
+    const numbers = cardMap[cardIndex];
+    if (!Array.isArray(numbers)) {
+      return;
+    }
+    numbers.forEach((value) => {
+      const selector = `[data-card="${cardIndex}"][data-number="${value}"]`;
+      document.querySelectorAll(selector).forEach((cell) => {
+        setDaubed(cell, true);
+      });
+    });
+  });
 }
 
 function emitDaubUpdate(cell, next) {
@@ -707,6 +749,19 @@ function connectSocket(serverUrl) {
       }
       return;
     }
+    applyDaubs(masterSeed, payload && payload.daubs);
+    const totalCards = allowedCards
+      ? Object.values(allowedCards).reduce((sum, value) => {
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? sum + parsed : sum;
+        }, 0)
+      : 0;
+    renderPrizePot(
+      totalCards,
+      Number(payload && payload.costPerCard),
+      Number(payload && payload.startingPot),
+      Number(payload && payload.prizePercentage)
+    );
     if (
       allowedCards &&
       Object.prototype.hasOwnProperty.call(allowedCards, masterSeed)

@@ -59,5 +59,6 @@ namespace FFXIVBingo4All
     {
         public string PlayerName { get; set; } = string.Empty;
         public int CardCount { get; set; } = 0;
+        public string ShortCode { get; set; } = string.Empty;
     }
 }

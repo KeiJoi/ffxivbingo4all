@@ -2,7 +2,10 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
+const path = require("path");
+const sqlite3 = require("sqlite3").verbose();
 const { adminKey } = require("./admin.config");
+const { dbPath } = require("./server.config");
 
 const app = express();
 app.use(cors({ origin: "*" }));
@@ -15,6 +18,44 @@ const io = new Server(server, {
 });
 
 const games = {};
+
+const resolvedDbPath = path.isAbsolute(dbPath)
+  ? dbPath
+  : path.resolve(__dirname, dbPath);
+const db = new sqlite3.Database(resolvedDbPath);
+db.serialize(() => {
+  db.run(
+    `CREATE TABLE IF NOT EXISTS short_links (
+      code TEXT PRIMARY KEY,
+      payload TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`
+  );
+});
+
+function dbGet(query, params) {
+  return new Promise((resolve, reject) => {
+    db.get(query, params, (err, row) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(row || null);
+    });
+  });
+}
+
+function dbRun(query, params) {
+  return new Promise((resolve, reject) => {
+    db.run(query, params, function runCallback(err) {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve(this);
+    });
+  });
+}
 
 function touchSession(session) {
   session.updatedAt = Date.now();
@@ -51,6 +92,106 @@ function getAllowedSeeds(session) {
   return Array.isArray(session.allowedSeeds) ? session.allowedSeeds : [];
 }
 
+function normalizeHex(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const cleaned = value.replace("#", "").trim();
+  if (/^[0-9a-fA-F]{3}$/.test(cleaned)) {
+    return cleaned
+      .split("")
+      .map((ch) => ch + ch)
+      .join("")
+      .toUpperCase();
+  }
+  if (/^[0-9a-fA-F]{6}$/.test(cleaned)) {
+    return cleaned.toUpperCase();
+  }
+  return null;
+}
+
+function normalizeLetters(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const cleaned = value
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .join("")
+    .toUpperCase();
+  if (cleaned.length < 1 || cleaned.length > 5) {
+    return null;
+  }
+  return cleaned;
+}
+
+function generateCode(length) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let result = "";
+  for (let i = 0; i < length; i += 1) {
+    const index = Math.floor(Math.random() * alphabet.length);
+    result += alphabet[index];
+  }
+  return result;
+}
+
+async function createShortCode() {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const code = generateCode(6);
+    const existing = await dbGet(
+      "SELECT code FROM short_links WHERE code = ?",
+      [code]
+    );
+    if (!existing) {
+      return code;
+    }
+  }
+  return null;
+}
+
+function buildRedirectQuery(payload) {
+  const params = new URLSearchParams();
+  params.set("seed", payload.seed);
+  params.set("count", String(payload.count));
+  if (payload.letters) {
+    params.set("letters", payload.letters);
+  }
+  if (payload.player) {
+    params.set("player", payload.player);
+  }
+  if (payload.title) {
+    params.set("title", payload.title);
+  }
+  if (payload.room) {
+    params.set("room", payload.room);
+  }
+  if (payload.game) {
+    params.set("game", payload.game);
+  }
+  if (payload.bg) {
+    params.set("bg", payload.bg);
+  }
+  if (payload.card) {
+    params.set("card", payload.card);
+  }
+  if (payload.header) {
+    params.set("header", payload.header);
+  }
+  if (payload.text) {
+    params.set("text", payload.text);
+  }
+  if (payload.daub) {
+    params.set("daub", payload.daub);
+  }
+  if (payload.ball) {
+    params.set("ball", payload.ball);
+  }
+  if (payload.server) {
+    params.set("server", payload.server);
+  }
+  return params.toString();
+}
+
 function isAdminRequest(req) {
   const headerKey = req.get("x-admin-key");
   const queryKey = req.query?.key;
@@ -67,6 +208,9 @@ function getSession(roomCode) {
       daubs: {},
       lastBingo: null,
       bingoCalls: [],
+      costPerCard: 0,
+      startingPot: 0,
+      prizePercentage: 0,
       gameType: "Single Line",
       updatedAt: Date.now(),
     };
@@ -75,8 +219,16 @@ function getSession(roomCode) {
 }
 
 app.post("/api/host-sync", (req, res) => {
-  const { roomCode, calledNumbers, allowedSeeds, allowedCards, gameType } =
-    req.body || {};
+  const {
+    roomCode,
+    calledNumbers,
+    allowedSeeds,
+    allowedCards,
+    gameType,
+    costPerCard,
+    startingPot,
+    prizePercentage,
+  } = req.body || {};
   console.log("api_host_sync", req.body);
 
   if (!roomCode) {
@@ -109,6 +261,16 @@ app.post("/api/host-sync", (req, res) => {
   if (typeof gameType === "string" && gameType.trim().length > 0) {
     session.gameType = gameType.trim();
   }
+  if (Number.isFinite(costPerCard)) {
+    session.costPerCard = Math.max(0, Math.floor(Number(costPerCard)));
+  }
+  if (Number.isFinite(startingPot)) {
+    session.startingPot = Math.max(0, Math.floor(Number(startingPot)));
+  }
+  if (Number.isFinite(prizePercentage)) {
+    const parsed = Number(prizePercentage);
+    session.prizePercentage = Math.min(Math.max(parsed, 0), 100);
+  }
   touchSession(session);
 
   console.log("host_sync_updated", {
@@ -121,6 +283,9 @@ app.post("/api/host-sync", (req, res) => {
     calledNumbers: session.calledNumbers,
     allowedSeeds: session.allowedSeeds,
     allowedCards: session.allowedCards,
+    costPerCard: session.costPerCard,
+    startingPot: session.startingPot,
+    prizePercentage: session.prizePercentage,
     gameType: session.gameType,
   });
 });
@@ -199,8 +364,124 @@ app.get("/api/room-state", (req, res) => {
     daubs: session.daubs,
     lastBingo: session.lastBingo,
     bingoCalls: Array.isArray(session.bingoCalls) ? session.bingoCalls : [],
+    costPerCard: session.costPerCard,
+    startingPot: session.startingPot,
+    prizePercentage: session.prizePercentage,
     gameType: session.gameType,
   });
+});
+
+app.post("/api/links", async (req, res) => {
+  if (!isAdminRequest(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const {
+    seed,
+    count,
+    letters,
+    player,
+    title,
+    room,
+    game,
+    bg,
+    card,
+    header,
+    text,
+    daub,
+    ball,
+    server,
+  } = req.body || {};
+
+  if (typeof seed !== "string" || seed.trim().length === 0) {
+    return res.status(400).json({ error: "seed required" });
+  }
+
+  const parsedCount = Number(count);
+  if (!Number.isInteger(parsedCount) || parsedCount < 1 || parsedCount > 16) {
+    return res.status(400).json({ error: "count must be 1-16" });
+  }
+
+  const normalizedLetters = letters ? normalizeLetters(letters) : null;
+  if (letters && !normalizedLetters) {
+    return res.status(400).json({ error: "letters must be 1-5 characters" });
+  }
+
+  const payload = {
+    seed: seed.trim(),
+    count: parsedCount,
+    letters: normalizedLetters || undefined,
+    player: typeof player === "string" ? player.trim() : undefined,
+    title: typeof title === "string" ? title.trim() : undefined,
+    room: typeof room === "string" ? room.trim() : undefined,
+    game: typeof game === "string" ? game.trim() : undefined,
+    bg: bg ? normalizeHex(bg) : undefined,
+    card: card ? normalizeHex(card) : undefined,
+    header: header ? normalizeHex(header) : undefined,
+    text: text ? normalizeHex(text) : undefined,
+    daub: daub ? normalizeHex(daub) : undefined,
+    ball: ball ? normalizeHex(ball) : undefined,
+    server: typeof server === "string" ? server.trim() : undefined,
+  };
+
+  const colorsValid =
+    (!bg || payload.bg) &&
+    (!card || payload.card) &&
+    (!header || payload.header) &&
+    (!text || payload.text) &&
+    (!daub || payload.daub) &&
+    (!ball || payload.ball);
+  if (!colorsValid) {
+    return res.status(400).json({ error: "invalid color value" });
+  }
+
+  const code = await createShortCode();
+  if (!code) {
+    return res.status(500).json({ error: "code generation failed" });
+  }
+
+  try {
+    await dbRun(
+      "INSERT INTO short_links (code, payload, created_at) VALUES (?, ?, ?)",
+      [code, JSON.stringify(payload), Date.now()]
+    );
+  } catch (err) {
+    console.error("short_link_insert_failed", err);
+    return res.status(500).json({ error: "link storage failed" });
+  }
+
+  return res.json({ ok: true, code });
+});
+
+app.get("/l/:code", async (req, res) => {
+  const code = String(req.params.code || "").trim().toUpperCase();
+  if (!code) {
+    return res.status(404).send("Not found");
+  }
+
+  try {
+    const row = await dbGet("SELECT payload FROM short_links WHERE code = ?", [
+      code,
+    ]);
+    if (!row) {
+      return res.status(404).send("Not found");
+    }
+
+    let payload = null;
+    try {
+      payload = JSON.parse(row.payload);
+    } catch (err) {
+      console.error("short_link_payload_invalid", err);
+      return res.status(500).send("Invalid link data");
+    }
+
+    const query = buildRedirectQuery(payload);
+    const target = query.length > 0 ? `/index.html?${query}` : "/index.html";
+    return res.redirect(target);
+  } catch (err) {
+    console.error("short_link_lookup_failed", err);
+    return res.status(500).send("Link lookup failed");
+  }
 });
 
 app.post("/api/call-number", (req, res) => {
@@ -277,8 +558,12 @@ io.on("connection", (socket) => {
       calledNumbers: session.calledNumbers,
       allowedSeeds,
       allowedCards: session.allowedCards,
+      daubs: session.daubs,
       bingoCalls: Array.isArray(session.bingoCalls) ? session.bingoCalls : [],
       enforceSeeds,
+      costPerCard: session.costPerCard,
+      startingPot: session.startingPot,
+      prizePercentage: session.prizePercentage,
       gameType: session.gameType,
     });
   });

@@ -54,6 +54,7 @@ namespace FFXIVBingo4All
         private bool startRequested = false;
         private string lastRollStatus = string.Empty;
         private string lastPostStatus = string.Empty;
+        private string lastGeneratedSeed = string.Empty;
         private readonly ConcurrentQueue<QueuedChat> chatQueue = new();
         private readonly Dictionary<string, Dictionary<int, HashSet<int>>> roomDaubs = new();
         private readonly object roomStateLock = new();
@@ -256,6 +257,9 @@ namespace FFXIVBingo4All
                 allowedCards = configuration.IssuedCards.ToDictionary(
                     entry => entry.Key,
                     entry => Math.Clamp(entry.Value.CardCount, 1, 16)),
+                costPerCard = configuration.CostPerCard,
+                startingPot = configuration.StartingPot,
+                prizePercentage = configuration.PrizePercentage,
                 gameType = configuration.GameType,
             };
 
@@ -519,15 +523,18 @@ namespace FFXIVBingo4All
                 var seed = Guid.NewGuid().ToString();
                 var letters = NormalizeLetters(configuration.CustomHeaderLetters);
                 generatedLink = BuildClientUrl(seed, playerCardCount, letters, displayName);
+                lastGeneratedSeed = seed;
 
                 RemoveIssuedCardsForPlayer(ledgerName);
                 configuration.IssuedCards[seed] = new PlayerData
                 {
                     PlayerName = ledgerName,
                     CardCount = playerCardCount,
+                    ShortCode = string.Empty,
                 };
                 configuration.Save();
                 _ = Task.Run(SyncHostStateAsync);
+                _ = Task.Run(() => CreateShortLinkForSeedAsync(seed, playerCardCount, letters, displayName));
             }
 
             if (!string.IsNullOrEmpty(generatedLink))
@@ -616,7 +623,9 @@ namespace FFXIVBingo4All
                 var seed = entry.Key;
                 var data = entry.Value;
                 var letters = NormalizeLetters(configuration.CustomHeaderLetters);
-                string link = BuildClientUrl(seed, data.CardCount, letters, data.PlayerName);
+                string link = !string.IsNullOrWhiteSpace(data.ShortCode)
+                    ? BuildShortUrl(data.ShortCode)
+                    : BuildClientUrl(seed, data.CardCount, letters, data.PlayerName);
 
                 ImGui.Separator();
                 ImGui.Text(data.PlayerName);
@@ -1143,11 +1152,15 @@ namespace FFXIVBingo4All
                 if (update.newCount > 0)
                 {
                     var newSeed = Guid.NewGuid().ToString();
+                    var playerName = NormalizePlayerName(update.playerName);
                     configuration.IssuedCards[newSeed] = new PlayerData
                     {
-                        PlayerName = NormalizePlayerName(update.playerName),
+                        PlayerName = playerName,
                         CardCount = update.newCount,
+                        ShortCode = string.Empty,
                     };
+                    _ = Task.Run(() =>
+                        CreateShortLinkForSeedAsync(newSeed, update.newCount, NormalizeLetters(configuration.CustomHeaderLetters), playerName));
                 }
             }
         }
@@ -1232,6 +1245,112 @@ namespace FFXIVBingo4All
                 url = AppendQueryParam(url, "room", configuration.CurrentRoomCode);
             }
             return url;
+        }
+
+        private Dictionary<string, object?> BuildLinkPayload(
+            string seed,
+            int count,
+            string letters,
+            string? player)
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["seed"] = seed,
+                ["count"] = Math.Clamp(count, 1, 16),
+                ["letters"] = letters,
+                ["player"] = string.IsNullOrWhiteSpace(player) ? null : player.Trim(),
+                ["title"] = string.IsNullOrWhiteSpace(configuration.VenueName)
+                    ? null
+                    : configuration.VenueName.Trim(),
+                ["room"] = string.IsNullOrWhiteSpace(configuration.CurrentRoomCode)
+                    ? null
+                    : configuration.CurrentRoomCode.Trim(),
+                ["game"] = configuration.GameType,
+                ["bg"] = ColorToHex(configuration.BgColor),
+                ["card"] = ColorToHex(configuration.CardColor),
+                ["header"] = ColorToHex(configuration.HeaderColor),
+                ["text"] = ColorToHex(configuration.TextColor),
+                ["daub"] = ColorToHex(configuration.DaubColor),
+                ["ball"] = ColorToHex(configuration.BallColor),
+                ["server"] = GetServerBaseUrl(),
+            };
+
+            return payload;
+        }
+
+        private string BuildShortUrl(string code)
+        {
+            return $"{GetServerBaseUrl()}/l/{code}";
+        }
+
+        private async Task<string> CreateShortLinkAsync(Dictionary<string, object?> payload)
+        {
+            try
+            {
+                var adminKey = configuration.AdminKey?.Trim();
+                if (string.IsNullOrWhiteSpace(adminKey))
+                {
+                    DebugChat("Admin key is required for short links.");
+                    return string.Empty;
+                }
+
+                var cleaned = payload
+                    .Where(entry =>
+                        entry.Value != null &&
+                        !(entry.Value is string text && string.IsNullOrWhiteSpace(text)))
+                    .ToDictionary(entry => entry.Key, entry => entry.Value!);
+
+                var json = JsonSerializer.Serialize(cleaned);
+                using var request = new HttpRequestMessage(
+                    HttpMethod.Post,
+                    $"{GetServerBaseUrl()}/api/links");
+                request.Headers.Add("x-admin-key", adminKey);
+                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                var response = await httpClient.SendAsync(request).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    DebugChat($"Short link failed ({response.StatusCode}).");
+                    return string.Empty;
+                }
+
+                var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("code", out var codeEl))
+                {
+                    return codeEl.GetString() ?? string.Empty;
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugChat($"Short link failed: {ex.Message}", true);
+            }
+
+            return string.Empty;
+        }
+
+        private async Task CreateShortLinkForSeedAsync(
+            string seed,
+            int count,
+            string letters,
+            string? player)
+        {
+            var payload = BuildLinkPayload(seed, count, letters, player);
+            var code = await CreateShortLinkAsync(payload).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(code))
+            {
+                return;
+            }
+
+            if (configuration.IssuedCards.TryGetValue(seed, out var data))
+            {
+                data.ShortCode = code;
+                configuration.Save();
+            }
+
+            if (seed == lastGeneratedSeed)
+            {
+                generatedLink = BuildShortUrl(code);
+            }
         }
 
         private static string ColorToHex(System.Numerics.Vector4 color)

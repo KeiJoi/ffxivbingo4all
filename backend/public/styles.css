@@ -105,6 +105,11 @@ header h1 {
   text-transform: uppercase;
 }
 
+.pot-display {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
 .bingo-panel {
   background: var(--header-bg);
   border-radius: 12px;

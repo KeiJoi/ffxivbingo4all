@@ -1,0 +1,27 @@
+{
+  "plugins": [
+    {
+      "Name": "FFXIV Bingo 4 All",
+      "InternalName": "FFXIVBingo4All",
+      "AssemblyVersion": "0.1.0.0",
+      "TestingAssemblyVersion": "0.1.0.0",
+      "Author": "FFXIVBingo4All",
+      "Punchline": "Bingo host relay and client management.",
+      "Description": "Host relay plugin for multi-card bingo.",
+      "Tags": [
+        "Gamba",
+        "Bingo"
+      ],
+      "ApplicableVersion": "any",
+      "DalamudApiLevel": 14,
+      "RepoUrl": "https://your-domain.example/ffxivbingo4all/repo.json",
+      "DownloadLinkInstall": "https://your-domain.example/ffxivbingo4all/FFXIVBingo4All.zip",
+      "DownloadLinkUpdate": "https://your-domain.example/ffxivbingo4all/FFXIVBingo4All.zip",
+      "DownloadLinkTesting": "https://your-domain.example/ffxivbingo4all/FFXIVBingo4All.zip",
+      "DownloadLinkTestingUpdate": "https://your-domain.example/ffxivbingo4all/FFXIVBingo4All.zip",
+      "LastUpdate": "2024-01-01T00:00:00Z",
+      "Changelog": "Initial release.",
+      "IconUrl": "https://your-domain.example/ffxivbingo4all/icon.png"
+    }
+  ]
+}
