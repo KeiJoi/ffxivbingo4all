@@ -6,7 +6,7 @@
       InternalName: "FFXIVBingo4All",
       AssemblyVersion: "0.1.0.0",
       TestingAssemblyVersion: null,
-      RepoUrl: "https://github.com/KeiJoi/ffxivbingo4all/repo.json",
+      RepoUrl: "https://github.com/KeiJoi/ffxivbingo4all",
       ApplicableVersion: "any",
       DalamudApiLevel: 14,
       Punchline: "Bingo host relay and client management.",
