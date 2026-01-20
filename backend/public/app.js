@@ -459,12 +459,6 @@ if (calledGrid) {
     const row = document.createElement("div");
     row.className = "called-row";
 
-    const headerBall = document.createElement("div");
-    headerBall.className = "called-number called-header";
-    headerBall.dataset.letter = headers[col];
-    headerBall.textContent = headers[col];
-    row.appendChild(headerBall);
-
     for (let i = 1; i <= 15; i += 1) {
       const value = (col * 15) + i;
       const button = document.createElement("button");

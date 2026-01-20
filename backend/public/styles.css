@@ -148,13 +148,15 @@ header h1 {
   gap: 8px;
   overflow-x: auto;
   padding-bottom: 4px;
+  justify-items: center;
 }
 
 .called-row {
   display: grid;
-  grid-template-columns: repeat(16, var(--called-ball-size));
+  grid-template-columns: repeat(15, var(--called-ball-size));
   gap: 4px;
   width: max-content;
+  justify-content: center;
 }
 
 .called-number {
@@ -178,12 +180,6 @@ header h1 {
   cursor: pointer;
 }
 
-.called-header {
-  background: var(--header-bg);
-  color: var(--header-text);
-  font-weight: 700;
-  cursor: default;
-}
 
 .called-note {
   font-size: 12px;
