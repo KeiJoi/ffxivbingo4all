@@ -1592,6 +1592,9 @@ namespace FFXIVBingo4All
             configuration.BingoActive = true;
             configuration.CurrentRoomCode = Guid.NewGuid().ToString();
             configuration.CalledNumbers.Clear();
+            configuration.IssuedCards.Clear();
+            generatedLink = string.Empty;
+            lastGeneratedSeed = string.Empty;
             lastRollStatus = string.Empty;
             lastPostStatus = string.Empty;
             lastBingoDisplay = string.Empty;
