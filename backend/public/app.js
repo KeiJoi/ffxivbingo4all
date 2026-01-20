@@ -12,6 +12,7 @@ const count =
 const lettersParam = params.get("letters") || "BINGO";
 const playerParam = params.get("player") || params.get("name") || "";
 const titleParam = params.get("title") || "";
+const gameParam = params.get("game") || params.get("type") || "";
 
 function normalizeHex(value) {
   if (!value) {
@@ -55,6 +56,8 @@ let hasBingo = false;
 let isConnected = false;
 let enforceSeeds = false;
 const cardMatrices = [];
+const gameTypes = ["Single Line", "Two Lines", "Four Corners", "Blackout"];
+let currentGameType = normalizeGameType(gameParam) || "Single Line";
 
 const playerName =
   (playerParam || "").trim().length > 0 ? playerParam.trim().slice(0, 32) : "";
@@ -81,6 +84,19 @@ function setBingoBanner(message) {
   }
   bingoBanner.textContent = message;
   bingoBanner.classList.toggle("active", Boolean(message));
+}
+
+function normalizeGameType(value) {
+  const trimmed = (value || "").trim().toLowerCase();
+  if (!trimmed) {
+    return "";
+  }
+  for (const type of gameTypes) {
+    if (type.toLowerCase() === trimmed) {
+      return type;
+    }
+  }
+  return "";
 }
 
 function showCheatMessage() {
@@ -226,6 +242,28 @@ function isCellDaubed(cell) {
 }
 
 function cardHasBingo(matrix) {
+  const lowerType = currentGameType.toLowerCase();
+  if (lowerType === "four corners") {
+    return (
+      isCellDaubed(matrix[0][0]) &&
+      isCellDaubed(matrix[0][4]) &&
+      isCellDaubed(matrix[4][0]) &&
+      isCellDaubed(matrix[4][4])
+    );
+  }
+
+  if (lowerType === "blackout") {
+    for (let row = 0; row < 5; row += 1) {
+      for (let col = 0; col < 5; col += 1) {
+        if (!isCellDaubed(matrix[row][col])) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  let lines = 0;
   for (let row = 0; row < 5; row += 1) {
     let rowComplete = true;
     for (let col = 0; col < 5; col += 1) {
@@ -235,7 +273,7 @@ function cardHasBingo(matrix) {
       }
     }
     if (rowComplete) {
-      return true;
+      lines += 1;
     }
   }
 
@@ -248,7 +286,7 @@ function cardHasBingo(matrix) {
       }
     }
     if (colComplete) {
-      return true;
+      lines += 1;
     }
   }
 
@@ -260,7 +298,7 @@ function cardHasBingo(matrix) {
     }
   }
   if (diagComplete) {
-    return true;
+    lines += 1;
   }
 
   let antiDiagComplete = true;
@@ -270,7 +308,15 @@ function cardHasBingo(matrix) {
       break;
     }
   }
-  return antiDiagComplete;
+  if (antiDiagComplete) {
+    lines += 1;
+  }
+
+  if (lowerType === "two lines") {
+    return lines >= 2;
+  }
+
+  return lines >= 1;
 }
 
 function updateBingoState() {
@@ -428,6 +474,9 @@ if (count > 0) {
     const allowedSeeds = (payload && payload.allowedSeeds) || [];
     enforceSeeds =
       Boolean(payload && payload.enforceSeeds) || allowedSeeds.length > 0;
+    if (payload && payload.gameType) {
+      currentGameType = normalizeGameType(payload.gameType) || currentGameType;
+    }
     if (enforceSeeds && !allowedSeeds.includes(masterSeed)) {
       showCheatMessage();
       if (socket) {
@@ -439,6 +488,7 @@ if (count > 0) {
     called.forEach((value) => {
       markCalled(String(value));
     });
+    updateBingoState();
   });
 
   socket.on("number_called", (payload) => {

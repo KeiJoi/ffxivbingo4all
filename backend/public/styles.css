@@ -33,6 +33,10 @@
   --daub-text: #0c1116;
   --ball-color: #f3f3f3;
   --ball-text: #121417;
+  --card-ball-size: 42px;
+  --called-ball-size: calc(var(--card-ball-size) * 2);
+  --card-ball-font: calc(var(--card-ball-size) * 0.4);
+  --called-ball-font: calc(var(--called-ball-size) * 0.35);
 }
 
 * {
@@ -137,8 +141,9 @@ header h1 {
 
 .called-grid {
   display: grid;
-  grid-template-columns: repeat(10, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, var(--called-ball-size));
   gap: 4px;
+  justify-content: start;
 }
 
 .called-number {
@@ -146,9 +151,9 @@ header h1 {
   border: 2px solid rgba(0, 0, 0, 0.15);
   color: var(--ball-text);
   border-radius: 999px;
-  min-height: 28px;
-  aspect-ratio: 1;
-  font-size: 12px;
+  width: var(--called-ball-size);
+  height: var(--called-ball-size);
+  font-size: var(--called-ball-font);
   cursor: not-allowed;
   box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.5),
     inset 0 -2px 4px rgba(0, 0, 0, 0.2);
@@ -199,8 +204,9 @@ header h1 {
 
 .card-header {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, var(--card-ball-size));
   gap: 4px;
+  justify-content: center;
 }
 
 .header-cell {
@@ -216,8 +222,9 @@ header h1 {
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, var(--card-ball-size));
   gap: 4px;
+  justify-content: center;
 }
 
 .cell {
@@ -225,11 +232,11 @@ header h1 {
   border: 2px solid rgba(0, 0, 0, 0.15);
   color: var(--ball-text);
   border-radius: 999px;
-  min-height: 48px;
-  aspect-ratio: 1;
+  width: var(--card-ball-size);
+  height: var(--card-ball-size);
   display: grid;
   place-items: center;
-  font-size: 18px;
+  font-size: var(--card-ball-font);
   font-weight: 600;
   cursor: pointer;
   box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.5),
@@ -274,6 +281,10 @@ header h1 {
     align-items: flex-start;
   }
 
+  :root {
+    --card-ball-size: 36px;
+  }
+
   .meta {
     text-align: left;
   }
@@ -283,8 +294,7 @@ header h1 {
   }
 
   .cell {
-    min-height: 40px;
-    font-size: 16px;
+    font-size: var(--card-ball-font);
   }
 }
 

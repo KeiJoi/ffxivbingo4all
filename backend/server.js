@@ -216,6 +216,7 @@ io.on("connection", (socket) => {
       calledNumbers: session.calledNumbers,
       allowedSeeds: session.allowedSeeds,
       enforceSeeds,
+      gameType: session.gameType,
     });
   });
 

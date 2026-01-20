@@ -50,6 +50,8 @@ namespace FFXIVBingo4All
         private bool showServerRoomsWindow = false;
         private bool showCalledBallsWindow = false;
         private bool showStartPopup = false;
+        private bool showSkinWindow = false;
+        private bool startRequested = false;
         private string lastRollStatus = string.Empty;
         private string lastPostStatus = string.Empty;
         private readonly ConcurrentQueue<QueuedChat> chatQueue = new();
@@ -83,6 +85,7 @@ namespace FFXIVBingo4All
         private List<AdminRoomInfo> adminRooms = new();
         private bool adminRoomsLoading = false;
         private string adminRoomsStatus = string.Empty;
+        private DateTime lastAdminRoomsFetch = DateTime.MinValue;
         private int broadcastCommandIndex = 0;
         private string broadcastCopyStatus = string.Empty;
         private string skinCopyStatus = string.Empty;
@@ -348,6 +351,7 @@ namespace FFXIVBingo4All
             DrawServerRoomsWindow();
             DrawCalledBallsWindow();
             DrawStartPopup();
+            DrawSkinWindow();
         }
 
         private void DrawStats()
@@ -382,15 +386,20 @@ namespace FFXIVBingo4All
                 changed = true;
             }
 
-            if (ImGui.Button(configuration.BingoActive ? "Stop Bingo" : "Start Bingo"))
+            bool bingoActive = configuration.BingoActive;
+            if (ImGui.Checkbox("Bingo Active", ref bingoActive))
             {
-                if (configuration.BingoActive)
+                if (bingoActive)
                 {
-                    StopBingo();
+                    configuration.BingoActive = true;
+                    configuration.Save();
+                    startRequested = true;
+                    OpenStartPopup();
+                    lastRollStatus = "Select Start New Game or Resume.";
                 }
                 else
                 {
-                    OpenStartPopup();
+                    StopBingo();
                 }
             }
 
@@ -429,58 +438,19 @@ namespace FFXIVBingo4All
                 changed = true;
             }
 
-            var bg = configuration.BgColor;
-            if (ImGui.ColorEdit4("BG Color", ref bg))
+            int currentGameIndex = Array.IndexOf(GameTypes, configuration.GameType);
+            if (currentGameIndex < 0)
             {
-                configuration.BgColor = bg;
+                currentGameIndex = 0;
+            }
+            if (ImGui.Combo("Game Type", ref currentGameIndex, GameTypes, GameTypes.Length))
+            {
+                configuration.GameType = GameTypes[currentGameIndex];
                 changed = true;
-            }
-
-            var card = configuration.CardColor;
-            if (ImGui.ColorEdit4("Card Color", ref card))
-            {
-                configuration.CardColor = card;
-                changed = true;
-            }
-
-            var header = configuration.HeaderColor;
-            if (ImGui.ColorEdit4("Header Color", ref header))
-            {
-                configuration.HeaderColor = header;
-                changed = true;
-            }
-
-            var text = configuration.TextColor;
-            if (ImGui.ColorEdit4("Text Color", ref text))
-            {
-                configuration.TextColor = text;
-                changed = true;
-            }
-
-            var daub = configuration.DaubColor;
-            if (ImGui.ColorEdit4("Daub Color", ref daub))
-            {
-                configuration.DaubColor = daub;
-                changed = true;
-            }
-
-            var ball = configuration.BallColor;
-            if (ImGui.ColorEdit4("Ball Color", ref ball))
-            {
-                configuration.BallColor = ball;
-                changed = true;
-            }
-
-            if (ImGui.Button("SKIN ME"))
-            {
-                var skin = BuildSkinQueryString();
-                ImGui.SetClipboardText(skin);
-                skinCopyStatus = "Skin copied.";
-            }
-
-            if (!string.IsNullOrWhiteSpace(skinCopyStatus))
-            {
-                ImGui.Text(skinCopyStatus);
+                if (configuration.BingoActive)
+                {
+                    _ = Task.Run(SyncHostStateAsync);
+                }
             }
 
             if (ImGui.Button("Web Settings"))
@@ -498,6 +468,13 @@ namespace FFXIVBingo4All
             if (ImGui.Button("Called Balls"))
             {
                 showCalledBallsWindow = true;
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Skin Me"))
+            {
+                showSkinWindow = true;
+                skinCopyStatus = string.Empty;
             }
 
             ImGui.SameLine();
@@ -749,9 +726,13 @@ namespace FFXIVBingo4All
                 ImGui.Text("This clears all called numbers and issued cards.");
                 ImGui.Text("A new room code will be created.");
                 ImGui.Separator();
+                ImGui.Text("Game Type");
+                ImGui.Combo("##reset_game_type", ref gameTypeIndex, GameTypes, GameTypes.Length);
+                ImGui.Separator();
 
                 if (ImGui.Button("Reset Now"))
                 {
+                    configuration.GameType = GameTypes[gameTypeIndex];
                     configuration.CurrentRoomCode = Guid.NewGuid().ToString();
                     configuration.CalledNumbers.Clear();
                     configuration.IssuedCards.Clear();
@@ -778,6 +759,83 @@ namespace FFXIVBingo4All
             }
         }
 
+        private void DrawSkinWindow()
+        {
+            if (!showSkinWindow)
+            {
+                return;
+            }
+
+            if (!ImGui.Begin("Skin Me", ref showSkinWindow, ImGuiWindowFlags.AlwaysAutoResize))
+            {
+                ImGui.End();
+                return;
+            }
+
+            bool changed = false;
+
+            var bg = configuration.BgColor;
+            if (ImGui.ColorEdit4("BG Color", ref bg))
+            {
+                configuration.BgColor = bg;
+                changed = true;
+            }
+
+            var card = configuration.CardColor;
+            if (ImGui.ColorEdit4("Card Color", ref card))
+            {
+                configuration.CardColor = card;
+                changed = true;
+            }
+
+            var header = configuration.HeaderColor;
+            if (ImGui.ColorEdit4("Header Color", ref header))
+            {
+                configuration.HeaderColor = header;
+                changed = true;
+            }
+
+            var text = configuration.TextColor;
+            if (ImGui.ColorEdit4("Text Color", ref text))
+            {
+                configuration.TextColor = text;
+                changed = true;
+            }
+
+            var daub = configuration.DaubColor;
+            if (ImGui.ColorEdit4("Daub Color", ref daub))
+            {
+                configuration.DaubColor = daub;
+                changed = true;
+            }
+
+            var ball = configuration.BallColor;
+            if (ImGui.ColorEdit4("Ball Color", ref ball))
+            {
+                configuration.BallColor = ball;
+                changed = true;
+            }
+
+            if (ImGui.Button("SKIN ME"))
+            {
+                var skin = BuildSkinQueryString();
+                ImGui.SetClipboardText(skin);
+                skinCopyStatus = "Skin copied.";
+            }
+
+            if (!string.IsNullOrWhiteSpace(skinCopyStatus))
+            {
+                ImGui.Text(skinCopyStatus);
+            }
+
+            if (changed)
+            {
+                configuration.Save();
+            }
+
+            ImGui.End();
+        }
+
         private void DrawServerRoomsWindow()
         {
             if (!showServerRoomsWindow)
@@ -785,6 +843,7 @@ namespace FFXIVBingo4All
                 return;
             }
 
+            MaybeRefreshAdminRooms();
             if (!ImGui.Begin(
                 "Server Rooms",
                 ref showServerRoomsWindow,
@@ -890,6 +949,11 @@ namespace FFXIVBingo4All
                 return;
             }
 
+            if (!ImGui.IsPopupOpen("Start Bingo"))
+            {
+                ImGui.OpenPopup("Start Bingo");
+            }
+
             bool open = true;
             if (ImGui.BeginPopupModal("Start Bingo", ref open, ImGuiWindowFlags.AlwaysAutoResize))
             {
@@ -925,6 +989,7 @@ namespace FFXIVBingo4All
                 {
                     configuration.GameType = GameTypes[gameTypeIndex];
                     StartNewBingo();
+                    startRequested = false;
                     showStartPopup = false;
                     ImGui.CloseCurrentPopup();
                 }
@@ -940,6 +1005,7 @@ namespace FFXIVBingo4All
                 {
                     configuration.GameType = GameTypes[gameTypeIndex];
                     SelectRoom(resumeRoomInput.Trim(), true);
+                    startRequested = false;
                     showStartPopup = false;
                     ImGui.CloseCurrentPopup();
                 }
@@ -952,6 +1018,12 @@ namespace FFXIVBingo4All
                 ImGui.SameLine();
                 if (ImGui.Button("Cancel"))
                 {
+                    if (startRequested)
+                    {
+                        configuration.BingoActive = false;
+                        configuration.Save();
+                        startRequested = false;
+                    }
                     showStartPopup = false;
                     ImGui.CloseCurrentPopup();
                 }
@@ -1240,6 +1312,22 @@ namespace FFXIVBingo4All
             }
         }
 
+        private void MaybeRefreshAdminRooms()
+        {
+            if (adminRoomsLoading)
+            {
+                return;
+            }
+
+            if (DateTime.UtcNow - lastAdminRoomsFetch < TimeSpan.FromSeconds(5))
+            {
+                return;
+            }
+
+            lastAdminRoomsFetch = DateTime.UtcNow;
+            _ = Task.Run(FetchAdminRoomsAsync);
+        }
+
         private async Task FetchAdminRoomsAsync()
         {
             if (adminRoomsLoading)
@@ -1302,7 +1390,8 @@ namespace FFXIVBingo4All
                     adminRooms = rooms;
                 }
 
-                adminRoomsStatus = string.Empty;
+                var now = DateTime.Now.ToString("HH:mm:ss");
+                adminRoomsStatus = $"Last update: {now}";
             }
             catch (Exception)
             {
