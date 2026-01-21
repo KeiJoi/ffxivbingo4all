@@ -50,9 +50,7 @@ namespace FFXIVBingo4All
         private readonly Action openConfigAction;
         private readonly Action openMainAction;
         private bool isOpen = false;
-        private bool showPlayersWindow = false;
         private bool showWebSettingsWindow = false;
-        private bool showResetPopup = false;
         private bool showServerRoomsWindow = false;
         private bool showCalledBallsWindow = false;
         private bool showStartPopup = false;
@@ -100,8 +98,6 @@ namespace FFXIVBingo4All
         private string broadcastCopyStatus = string.Empty;
         private string skinCopyStatus = string.Empty;
         private int gameTypeIndex = 0;
-        private int resumeRoomIndex = -1;
-        private string resumeRoomInput = string.Empty;
 
         private static readonly string[] BroadcastCommands = { "/yell", "/shout" };
         private static readonly string[] GameTypes =
@@ -384,46 +380,106 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            if (!ImGui.Begin("Bingo Host", ref isOpen, ImGuiWindowFlags.AlwaysAutoResize))
+            if (!ImGui.Begin("Bingo Host", ref isOpen))
             {
                 ImGui.End();
                 return;
             }
 
-            DrawStats();
-            ImGui.Separator();
-            DrawSettings();
-            ImGui.Separator();
-            DrawCallStatus();
-            ImGui.Separator();
-            DrawPlayerGenerator();
+            if (ImGui.BeginTabBar("bingo_tabs"))
+            {
+                if (ImGui.BeginTabItem("Game"))
+                {
+                    DrawGameTab();
+                    ImGui.EndTabItem();
+                }
+
+                if (ImGui.BeginTabItem("Server Settings"))
+                {
+                    DrawServerSettingsTab();
+                    ImGui.EndTabItem();
+                }
+
+                if (ImGui.BeginTabItem("UI Settings"))
+                {
+                    DrawUiSettingsTab();
+                    ImGui.EndTabItem();
+                }
+
+                ImGui.EndTabBar();
+            }
 
             ImGui.End();
 
-            DrawPlayersWindow();
             DrawPlayerCardWindows();
-            DrawWebSettingsWindow();
             DrawServerRoomsWindow();
             DrawCalledBallsWindow();
             DrawStartPopup();
-            DrawSkinWindow();
         }
 
-        private void DrawStats()
+        private void DrawGameTab()
+        {
+            DrawGameTopSection();
+            ImGui.Separator();
+
+            float availableWidth = ImGui.GetContentRegionAvail().X;
+            float spacing = ImGui.GetStyle().ItemSpacing.X;
+            float leftWidth = Math.Max(250f, (availableWidth - spacing) * 0.5f);
+
+            ImGui.BeginChild("game_left", new Vector2(leftWidth, 0), true);
+            DrawRoomPlayerControls();
+            ImGui.EndChild();
+
+            ImGui.SameLine();
+            ImGui.BeginChild("game_right", new Vector2(0, 0), true);
+            DrawPlayersPanel();
+            ImGui.EndChild();
+        }
+
+        private void DrawGameTopSection()
         {
             int totalCards = gameState.IssuedCards.Values.Sum(p => p.CardCount);
             int totalPot = gameState.StartingPot + (totalCards * gameState.CostPerCard);
             int prizePool = (int)MathF.Round(totalPot * (gameState.PrizePercentage / 100f));
+            int houseCut = Math.Max(0, totalPot - prizePool);
 
-            ImGui.Text("Stats Dashboard");
-            ImGui.Text($"Ticket Cost: {FormatNumber(gameState.CostPerCard)}");
-            ImGui.Text($"Starting Pot: {FormatNumber(gameState.StartingPot)}");
-            ImGui.Text($"Total Cards Sold: {FormatNumber(totalCards)}");
-            ImGui.Text($"Total Pot: {FormatNumber(totalPot)}");
-            ImGui.Text($"Prize Pool: {FormatNumber(prizePool)}");
-            ImGui.Text($"Prize Percentage: {gameState.PrizePercentage:0.##}%");
-            ImGui.Text($"Roll Parse: {(parseRollsEnabled ? "On" : "Off")}");
-            ImGui.Text($"Game Type: {gameState.GameType}");
+            ImGui.Text("Game Status");
+            if (ImGui.BeginTable("game_stats", 2, ImGuiTableFlags.SizingFixedFit))
+            {
+                ImGui.TableNextColumn();
+                ImGui.Text($"Ticket Cost: {FormatNumber(gameState.CostPerCard)}");
+                ImGui.Text($"Starting Pot: {FormatNumber(gameState.StartingPot)}");
+                ImGui.Text($"Total Pot: {FormatNumber(totalPot)}");
+                ImGui.Text($"Prize Pool: {FormatNumber(prizePool)}");
+                ImGui.Text($"House Cut: {FormatNumber(houseCut)}");
+                ImGui.Text($"Prize Percentage: {gameState.PrizePercentage:0.##}%");
+
+                ImGui.TableNextColumn();
+                ImGui.Text($"Total Cards Sold: {FormatNumber(totalCards)}");
+                ImGui.Text($"Game Type: {gameState.GameType}");
+                ImGui.Text($"Roll Parse: {(parseRollsEnabled ? "On" : "Off")}");
+                ImGui.Text("Call Status");
+                if (string.Equals(lastRollStatus, "DUPLICATE NUMBER", StringComparison.OrdinalIgnoreCase))
+                {
+                    ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), "DUPLICATE NUMBER");
+                }
+                ImGui.Text(string.IsNullOrWhiteSpace(lastPostStatus) ? "Last Send: -" : $"Last Send: {lastPostStatus}");
+                ImGui.Text(string.IsNullOrWhiteSpace(lastRollStatus) ? "Last Roll: -" : $"Last Roll: {lastRollStatus}");
+
+                bool parseEnabled = parseRollsEnabled;
+                if (ImGui.Checkbox("Parse /random 75", ref parseEnabled))
+                {
+                    parseRollsEnabled = parseEnabled;
+                }
+
+                if (ImGui.Button("Called Balls"))
+                {
+                    showCalledBallsWindow = true;
+                }
+
+                ImGui.EndTable();
+            }
+
             if (!string.IsNullOrWhiteSpace(lastBingoDisplay))
             {
                 ImGui.TextColored(
@@ -432,134 +488,30 @@ namespace FFXIVBingo4All
             }
         }
 
-        private void DrawSettings()
+        private void DrawRoomPlayerControls()
         {
-            ImGui.Text("Settings");
-            bool changedGame = false;
-            bool roomCodeChanged = false;
+            ImGui.Text("Room Controls");
 
-            string roomCode = gameState.RoomCode;
-            if (ImGui.InputText("Current Room Code", ref roomCode, 64))
-            {
-                gameState.RoomCode = roomCode.Trim();
-                roomCodeChanged = true;
-            }
-
-            bool parseEnabled = parseRollsEnabled;
-            if (ImGui.Checkbox("Parse /random 75", ref parseEnabled))
-            {
-                parseRollsEnabled = parseEnabled;
-            }
-
-            ImGui.SameLine();
-            if (ImGui.Button("Room Control"))
+            ImGui.Text($"Current Room: {(string.IsNullOrWhiteSpace(gameState.RoomCode) ? "None" : gameState.RoomCode)}");
+            if (ImGui.Button("Create Room"))
             {
                 OpenStartPopup();
-                lastRollStatus = "Select Start New Game or Resume.";
-            }
-
-            if (string.IsNullOrWhiteSpace(configuration.RoomKey))
-            {
-                ImGui.TextColored(
-                    new Vector4(1f, 0.35f, 0.35f, 1f),
-                    "Room key is required to start or resume games.");
-            }
-
-            int cost = gameState.CostPerCard;
-            if (ImGui.InputInt("Cost Per Card", ref cost))
-            {
-                gameState.CostPerCard = Math.Max(0, cost);
-                changedGame = true;
-            }
-
-            int startingPot = gameState.StartingPot;
-            if (ImGui.InputInt("Starting Pot", ref startingPot))
-            {
-                gameState.StartingPot = Math.Max(0, startingPot);
-                changedGame = true;
-            }
-
-            float percentage = gameState.PrizePercentage;
-            if (ImGui.InputFloat("Prize Percentage", ref percentage, 0f, 0f, "%.1f"))
-            {
-                gameState.PrizePercentage = Math.Clamp(percentage, 0f, 100f);
-                changedGame = true;
-            }
-
-            string letters = gameState.CustomHeaderLetters;
-            if (ImGui.InputText("Custom Letters", ref letters, 6))
-            {
-                gameState.CustomHeaderLetters = NormalizeLetters(letters);
-                changedGame = true;
-            }
-
-            string venueName = gameState.VenueName;
-            if (ImGui.InputText("Venue/Event", ref venueName, 64))
-            {
-                gameState.VenueName = venueName.Trim();
-                changedGame = true;
-            }
-
-            int currentGameIndex = Array.IndexOf(GameTypes, gameState.GameType);
-            if (currentGameIndex < 0)
-            {
-                currentGameIndex = 0;
-            }
-            if (ImGui.Combo("Game Type", ref currentGameIndex, GameTypes, GameTypes.Length))
-            {
-                gameState.GameType = GameTypes[currentGameIndex];
-                changedGame = true;
-            }
-
-            if (ImGui.Button("Web Settings"))
-            {
-                OpenWebSettingsWindow();
+                lastRollStatus = "Select a game type to create a room.";
             }
 
             ImGui.SameLine();
+            if (ImGui.Button("Leave Room"))
+            {
+                StopBingo();
+            }
+
             if (ImGui.Button("Server Rooms"))
             {
                 OpenServerRoomsWindow();
             }
 
-            ImGui.SameLine();
-            if (ImGui.Button("Called Balls"))
-            {
-                showCalledBallsWindow = true;
-            }
-
-            ImGui.SameLine();
-            if (ImGui.Button("Skin Me"))
-            {
-                showSkinWindow = true;
-                skinCopyStatus = string.Empty;
-            }
-
-            ImGui.SameLine();
-            if (ImGui.Button("Reset Room & Tickets"))
-            {
-                showResetPopup = true;
-                gameTypeIndex = Array.IndexOf(GameTypes, gameState.GameType);
-                if (gameTypeIndex < 0)
-                {
-                    gameTypeIndex = 0;
-                }
-                ImGui.OpenPopup("Reset Room");
-            }
-
-            if (showResetPopup)
-            {
-                DrawResetPopup();
-            }
-
-            if (roomCodeChanged && !string.IsNullOrWhiteSpace(gameState.RoomCode))
-            {
-                _ = Task.Run(() => FetchRoomStateAsync(true));
-            }
-            else if (changedGame && !string.IsNullOrWhiteSpace(gameState.RoomCode))
-            {
-                _ = Task.Run(SyncHostStateAsync);
-            }
+            ImGui.Separator();
+            DrawPlayerGenerator();
         }
 
         private void DrawPlayerGenerator()
@@ -666,49 +618,159 @@ namespace FFXIVBingo4All
                 }
             }
 
-            if (ImGui.Button("Players Window"))
+        }
+
+        private void DrawServerSettingsTab()
+        {
+            ImGui.Text("Connection Settings");
+            ImGui.InputText("Server Base URL", ref webServerUrlInput, 512);
+            ImGui.InputText("Client Base URL", ref webClientUrlInput, 512);
+            ImGui.InputText("Admin Key", ref adminKeyInput, 128, ImGuiInputTextFlags.Password);
+            ImGui.InputText("Room Key", ref roomKeyInput, 128, ImGuiInputTextFlags.Password);
+
+            if (ImGui.Button("Save Connection Settings"))
             {
-                showPlayersWindow = true;
+                configuration.ServerBaseUrl = NormalizeBaseUrl(webServerUrlInput, DefaultServerBaseUrl);
+                configuration.ClientBaseUrl = NormalizeBaseUrl(webClientUrlInput, DefaultClientBaseUrl);
+                configuration.AdminKey = adminKeyInput.Trim();
+                configuration.RoomKey = roomKeyInput.Trim();
+                webServerUrlInput = configuration.ServerBaseUrl;
+                webClientUrlInput = configuration.ClientBaseUrl;
+                adminKeyInput = configuration.AdminKey;
+                roomKeyInput = configuration.RoomKey;
+                configuration.Save();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Reset Defaults"))
+            {
+                configuration.ServerBaseUrl = DefaultServerBaseUrl;
+                configuration.ClientBaseUrl = DefaultClientBaseUrl;
+                configuration.AdminKey = string.Empty;
+                configuration.RoomKey = string.Empty;
+                webServerUrlInput = configuration.ServerBaseUrl;
+                webClientUrlInput = configuration.ClientBaseUrl;
+                adminKeyInput = configuration.AdminKey;
+                roomKeyInput = configuration.RoomKey;
+                configuration.Save();
+            }
+
+            ImGui.Separator();
+            ImGui.Text("Game Defaults");
+
+            bool changedGame = false;
+            int cost = gameState.CostPerCard;
+            if (ImGui.InputInt("Cost Per Card", ref cost))
+            {
+                gameState.CostPerCard = Math.Max(0, cost);
+                changedGame = true;
+            }
+
+            int startingPot = gameState.StartingPot;
+            if (ImGui.InputInt("Starting Pot", ref startingPot))
+            {
+                gameState.StartingPot = Math.Max(0, startingPot);
+                changedGame = true;
+            }
+
+            float percentage = gameState.PrizePercentage;
+            if (ImGui.InputFloat("Prize Percentage", ref percentage, 0f, 0f, "%.1f"))
+            {
+                gameState.PrizePercentage = Math.Clamp(percentage, 0f, 100f);
+                changedGame = true;
+            }
+
+            string letters = gameState.CustomHeaderLetters;
+            if (ImGui.InputText("Custom Letters", ref letters, 6))
+            {
+                gameState.CustomHeaderLetters = NormalizeLetters(letters);
+                changedGame = true;
+            }
+
+            string venueName = gameState.VenueName;
+            if (ImGui.InputText("Venue/Event", ref venueName, 64))
+            {
+                gameState.VenueName = venueName.Trim();
+                changedGame = true;
+            }
+
+            if (changedGame && !string.IsNullOrWhiteSpace(gameState.RoomCode))
+            {
+                _ = Task.Run(SyncHostStateAsync);
             }
         }
 
-        private void DrawCallStatus()
+        private void DrawUiSettingsTab()
         {
-            ImGui.Text("Call Status");
+            ImGui.Text("Skin Settings");
+            bool changed = false;
 
-            if (string.Equals(lastRollStatus, "DUPLICATE NUMBER", StringComparison.OrdinalIgnoreCase))
+            var bg = gameState.BgColor;
+            if (ImGui.ColorEdit4("BG Color", ref bg))
             {
-                ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), "DUPLICATE NUMBER");
+                gameState.BgColor = bg;
+                changed = true;
             }
 
-            if (!string.IsNullOrWhiteSpace(lastRollStatus))
+            var card = gameState.CardColor;
+            if (ImGui.ColorEdit4("Card Color", ref card))
             {
-                ImGui.Text($"Last Roll: {lastRollStatus}");
+                gameState.CardColor = card;
+                changed = true;
             }
 
-            if (!string.IsNullOrWhiteSpace(lastPostStatus))
+            var header = gameState.HeaderColor;
+            if (ImGui.ColorEdit4("Header Color", ref header))
             {
-                ImGui.Text($"Last Send: {lastPostStatus}");
+                gameState.HeaderColor = header;
+                changed = true;
+            }
+
+            var text = gameState.TextColor;
+            if (ImGui.ColorEdit4("Text Color", ref text))
+            {
+                gameState.TextColor = text;
+                changed = true;
+            }
+
+            var daub = gameState.DaubColor;
+            if (ImGui.ColorEdit4("Daub Color", ref daub))
+            {
+                gameState.DaubColor = daub;
+                changed = true;
+            }
+
+            var ball = gameState.BallColor;
+            if (ImGui.ColorEdit4("Ball Color", ref ball))
+            {
+                gameState.BallColor = ball;
+                changed = true;
+            }
+
+            if (ImGui.Button("SKIN ME"))
+            {
+                var skin = BuildSkinQueryString();
+                ImGui.SetClipboardText(skin);
+                skinCopyStatus = "Skin copied.";
+            }
+
+            if (!string.IsNullOrWhiteSpace(skinCopyStatus))
+            {
+                ImGui.Text(skinCopyStatus);
+            }
+
+            if (changed && !string.IsNullOrWhiteSpace(gameState.RoomCode))
+            {
+                _ = Task.Run(SyncHostStateAsync);
             }
         }
 
-        private void DrawPlayersWindow()
+        private void DrawPlayersPanel()
         {
-            if (!showPlayersWindow)
-            {
-                return;
-            }
-
-            if (!ImGui.Begin("Bingo Players", ref showPlayersWindow, ImGuiWindowFlags.AlwaysAutoResize))
-            {
-                ImGui.End();
-                return;
-            }
-
+            ImGui.Text("Players");
             if (gameState.IssuedCards.Count == 0)
             {
                 ImGui.Text("No players have been issued cards.");
-                ImGui.End();
                 return;
             }
 
@@ -725,15 +787,7 @@ namespace FFXIVBingo4All
                     : BuildClientUrl(seed, data.CardCount, letters, data.PlayerName);
 
                 ImGui.Separator();
-                ImGui.Text(data.PlayerName);
-                ImGui.Text($"Cards: {data.CardCount}");
-                ImGui.InputText($"Link##{seed}", ref link, 512, ImGuiInputTextFlags.ReadOnly);
-
-                if (ImGui.Button($"Copy##{seed}"))
-                {
-                    ImGui.SetClipboardText(link);
-                }
-
+                ImGui.Text($"{data.PlayerName} ({data.CardCount})");
                 ImGui.SameLine();
                 if (ImGui.Button($"+ Card##{seed}"))
                 {
@@ -762,6 +816,13 @@ namespace FFXIVBingo4All
                 {
                     OpenPlayerCardsWindow(seed, data.PlayerName, data.CardCount);
                 }
+
+                ImGui.InputText($"Link##{seed}", ref link, 512, ImGuiInputTextFlags.ReadOnly);
+                ImGui.SameLine();
+                if (ImGui.Button($"Copy##{seed}"))
+                {
+                    ImGui.SetClipboardText(link);
+                }
             }
 
             if (updates.Count > 0)
@@ -769,8 +830,6 @@ namespace FFXIVBingo4All
                 ApplyPlayerUpdates(updates);
                 _ = Task.Run(SyncHostStateAsync);
             }
-
-            ImGui.End();
         }
 
         private void OpenPlayerCardsWindow(string seed, string playerName, int cardCount)
@@ -910,47 +969,6 @@ namespace FFXIVBingo4All
             }
 
             ImGui.End();
-        }
-
-        private void DrawResetPopup()
-        {
-            bool open = true;
-            if (ImGui.BeginPopupModal("Reset Room", ref open, ImGuiWindowFlags.AlwaysAutoResize))
-            {
-                ImGui.Text("This clears all called numbers and issued cards.");
-                ImGui.Text("A new room code will be created.");
-                ImGui.Separator();
-                ImGui.Text("Game Type");
-                ImGui.Combo("##reset_game_type", ref gameTypeIndex, GameTypes, GameTypes.Length);
-                ImGui.Separator();
-
-                if (ImGui.Button("Reset Now"))
-                {
-                    gameState.GameType = GameTypes[gameTypeIndex];
-                    gameState.RoomCode = Guid.NewGuid().ToString();
-                    gameState.CalledNumbers.Clear();
-                    gameState.IssuedCards.Clear();
-                    generatedLink = string.Empty;
-                    lastGeneratedSeed = string.Empty;
-                    _ = Task.Run(SyncHostStateAsync);
-
-                    showResetPopup = false;
-                    ImGui.CloseCurrentPopup();
-                }
-
-                ImGui.SameLine();
-                if (ImGui.Button("Cancel"))
-                {
-                    showResetPopup = false;
-                    ImGui.CloseCurrentPopup();
-                }
-
-                ImGui.EndPopup();
-            }
-            else
-            {
-                showResetPopup = false;
-            }
         }
 
         private void DrawSkinWindow()
@@ -1125,15 +1143,12 @@ namespace FFXIVBingo4All
         private void OpenStartPopup()
         {
             showStartPopup = true;
-            resumeRoomInput = gameState.RoomCode;
             gameTypeIndex = Array.IndexOf(GameTypes, gameState.GameType);
             if (gameTypeIndex < 0)
             {
                 gameTypeIndex = 0;
             }
-            resumeRoomIndex = -1;
-            _ = Task.Run(FetchAdminRoomsAsync);
-            ImGui.OpenPopup("Start Bingo");
+            ImGui.OpenPopup("Create Room");
         }
 
         private void DrawStartPopup()
@@ -1143,55 +1158,31 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            if (!ImGui.IsPopupOpen("Start Bingo"))
+            if (!ImGui.IsPopupOpen("Create Room"))
             {
-                ImGui.OpenPopup("Start Bingo");
+                ImGui.OpenPopup("Create Room");
             }
 
             bool open = true;
-            if (ImGui.BeginPopupModal("Start Bingo", ref open, ImGuiWindowFlags.AlwaysAutoResize))
+            if (ImGui.BeginPopupModal("Create Room", ref open, ImGuiWindowFlags.AlwaysAutoResize))
             {
                 bool roomKeyMissing = string.IsNullOrWhiteSpace(configuration.RoomKey);
                 if (roomKeyMissing)
                 {
                     ImGui.TextColored(
                         new Vector4(1f, 0.35f, 0.35f, 1f),
-                        "Set a Room Key before starting or resuming.");
+                        "Set a Room Key before creating a room.");
                 }
 
                 ImGui.Text("Game Type");
                 ImGui.Combo("##game_type", ref gameTypeIndex, GameTypes, GameTypes.Length);
 
                 ImGui.Separator();
-                ImGui.Text("Resume Room");
-
-                List<AdminRoomInfo> rooms;
-                lock (adminRoomsLock)
-                {
-                    rooms = new List<AdminRoomInfo>(adminRooms);
-                }
-
-                if (rooms.Count > 0)
-                {
-                    var roomLabels = rooms.Select(r => r.RoomCode).ToArray();
-                    if (resumeRoomIndex < 0 || resumeRoomIndex >= roomLabels.Length)
-                    {
-                        resumeRoomIndex = 0;
-                    }
-                    ImGui.Combo("##resume_room", ref resumeRoomIndex, roomLabels, roomLabels.Length);
-                    resumeRoomInput = roomLabels[resumeRoomIndex];
-                }
-                else
-                {
-                    ImGui.InputText("Room Code", ref resumeRoomInput, 64);
-                }
-
-                ImGui.Separator();
                 if (roomKeyMissing)
                 {
                     ImGui.BeginDisabled();
                 }
-                if (ImGui.Button("Start New Game"))
+                if (ImGui.Button("Create Room"))
                 {
                     gameState.GameType = GameTypes[gameTypeIndex];
                     StartNewBingo();
@@ -1199,34 +1190,6 @@ namespace FFXIVBingo4All
                     ImGui.CloseCurrentPopup();
                 }
                 if (roomKeyMissing)
-                {
-                    ImGui.EndDisabled();
-                }
-
-                ImGui.SameLine();
-                bool hasResumeRoom = !string.IsNullOrWhiteSpace(resumeRoomInput);
-                if (!hasResumeRoom)
-                {
-                    ImGui.BeginDisabled();
-                }
-
-                if (roomKeyMissing)
-                {
-                    ImGui.BeginDisabled();
-                }
-                if (ImGui.Button("Resume Selected"))
-                {
-                    gameState.GameType = GameTypes[gameTypeIndex];
-                    SelectRoom(resumeRoomInput.Trim());
-                    showStartPopup = false;
-                    ImGui.CloseCurrentPopup();
-                }
-                if (roomKeyMissing)
-                {
-                    ImGui.EndDisabled();
-                }
-
-                if (!hasResumeRoom)
                 {
                     ImGui.EndDisabled();
                 }
