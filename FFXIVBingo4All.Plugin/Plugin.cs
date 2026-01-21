@@ -2139,7 +2139,7 @@ namespace FFXIVBingo4All
                     pendingPayoutYesClicked = false;
                     pendingPayoutStartTime = DateTime.UtcNow;
                     pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(500);
-                    var tradeCommand = $"/trade \"{pendingPayoutTargetName}\"";
+                    var tradeCommand = "/trade <t>";
                     if (!TrySendChatMessage(tradeCommand))
                     {
                         payoutStatus = "Failed to send /trade.";
