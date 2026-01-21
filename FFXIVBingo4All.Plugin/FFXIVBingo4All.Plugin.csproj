@@ -12,7 +12,7 @@
     <Description>Host relay plugin for multi-card bingo sessions.</Description>
     <ApplicableVersion>any</ApplicableVersion>
     <DalamudApiLevel>14</DalamudApiLevel>
-    <AssemblyVersion>0.3.1.8</AssemblyVersion>
+    <AssemblyVersion>0.3.1.9</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
