@@ -1356,33 +1356,41 @@ namespace FFXIVBingo4All
             ImGui.Text("Last Called");
             ImGui.SetWindowFontScale(1.6f);
             var callButtonSize = new Vector2(180, 0);
-            if (ImGui.Button(hasLast ? lastLabel : "--", callButtonSize))
+            if (ImGui.BeginTable("last_called_row", 2, ImGuiTableFlags.SizingFixedFit))
             {
-                if (hasLast)
+                ImGui.TableNextRow();
+                ImGui.TableSetColumnIndex(0);
+                if (ImGui.Button(hasLast ? lastLabel : "--", callButtonSize))
                 {
-                    string command = $"{BroadcastCommands[broadcastCommandIndex]} {lastLabel}";
-                    ImGui.SetClipboardText(command);
-                    broadcastCopyStatus = $"Copied: {command}";
+                    if (hasLast)
+                    {
+                        string command = $"{BroadcastCommands[broadcastCommandIndex]} {lastLabel}";
+                        ImGui.SetClipboardText(command);
+                        broadcastCopyStatus = $"Copied: {command}";
+                    }
+                    else
+                    {
+                        broadcastCopyStatus = "No number has been called yet.";
+                    }
                 }
-                else
+
+                ImGui.TableSetColumnIndex(1);
+                if (ImGui.Button("Call Number", callButtonSize))
                 {
-                    broadcastCopyStatus = "No number has been called yet.";
+                    if (pendingBroadcastRoll)
+                    {
+                        broadcastCopyStatus = "Roll already in progress.";
+                    }
+                    else
+                    {
+                        pendingBroadcastRoll = true;
+                        pendingBroadcastRollExpires = DateTime.UtcNow.AddSeconds(10);
+                        broadcastCopyStatus = "Rolling /random 75...";
+                        RollRandomNumber();
+                    }
                 }
-            }
-            ImGui.SameLine();
-            if (ImGui.Button("Call Number", callButtonSize))
-            {
-                if (pendingBroadcastRoll)
-                {
-                    broadcastCopyStatus = "Roll already in progress.";
-                }
-                else
-                {
-                    pendingBroadcastRoll = true;
-                    pendingBroadcastRollExpires = DateTime.UtcNow.AddSeconds(10);
-                    broadcastCopyStatus = "Rolling /random 75...";
-                    RollRandomNumber();
-                }
+
+                ImGui.EndTable();
             }
             ImGui.SetWindowFontScale(1.0f);
 
