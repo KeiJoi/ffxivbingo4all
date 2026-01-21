@@ -126,6 +126,10 @@ namespace FFXIVBingo4All
             {
                 HelpMessage = "Open the FFXIV Bingo host window.",
             });
+            CommandManager.AddHandler("/fb4all", new CommandInfo(OnCommand)
+            {
+                HelpMessage = "Open the FFXIV Bingo host window.",
+            });
             PluginInterface.UiBuilder.Draw += Draw;
             openConfigAction = RequestOpenFromUiBuilder;
             PluginInterface.UiBuilder.OpenConfigUi += openConfigAction;
@@ -137,6 +141,7 @@ namespace FFXIVBingo4All
         {
             ChatGui.ChatMessage -= OnChatMessage;
             CommandManager.RemoveHandler("/ffxivbingo4all");
+            CommandManager.RemoveHandler("/fb4all");
             PluginInterface.UiBuilder.Draw -= Draw;
             PluginInterface.UiBuilder.OpenConfigUi -= openConfigAction;
             PluginInterface.UiBuilder.OpenMainUi -= openMainAction;
