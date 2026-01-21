@@ -20,6 +20,10 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Bindings.ImGui;
 using ECommons;
+using ECommons.Automation;
+using ECommons.UIHelpers.AddonMasterImplementations;
+using FFXIVClientStructs.FFXIV.Component.GUI;
+using ECommonsCallback = ECommons.Automation.Callback;
 
 namespace FFXIVBingo4All
 {
@@ -40,12 +44,37 @@ namespace FFXIVBingo4All
         [PluginService] private static IObjectTable ObjectTable { get; set; } = null!;
         [PluginService] private static ITargetManager TargetManager { get; set; } = null!;
         [PluginService] private static IPluginLog PluginLog { get; set; } = null!;
-        [PluginService] private static IGameGui GameGui { get; set; } = null!;
 
         private readonly HttpClient httpClient = new()
         {
             Timeout = TimeSpan.FromSeconds(5),
         };
+
+        private enum PayoutStage
+        {
+            None,
+            StartTrade,
+            WaitTradeOpen,
+            OpenGilInput,
+            SetGilInput,
+            ReadyTrade,
+            WaitTradeClose,
+        }
+
+        private sealed class TradeAddonHelper : AddonMasterBase<AtkUnitBase>
+        {
+            public override string AddonDescription => "Trade";
+
+            public unsafe TradeAddonHelper(void* addon)
+                : base(addon)
+            {
+            }
+
+            public unsafe bool ClickReady(AtkComponentButton* button)
+            {
+                return ClickButtonIfEnabled(button);
+            }
+        }
 
         private Configuration configuration = null!;
         private GameState gameState = new();
@@ -63,9 +92,18 @@ namespace FFXIVBingo4All
         private string lastGeneratedSeed = string.Empty;
         private readonly HashSet<string> bingoCallers = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> paidOutCallers = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, int> payoutPaid = new(StringComparer.OrdinalIgnoreCase);
         private string payoutStatus = string.Empty;
         private string pendingPayoutName = string.Empty;
-        private bool pendingPayoutTradeOpenSeen = false;
+        private string pendingPayoutTargetName = string.Empty;
+        private readonly Queue<int> pendingPayoutChunks = new();
+        private int pendingPayoutChunk = 0;
+        private int pendingPayoutTargetTotal = 0;
+        private DateTime pendingPayoutNextActionAt = DateTime.MinValue;
+        private DateTime pendingPayoutStartTime = DateTime.MinValue;
+        private DateTime pendingPayoutLastYesNoAt = DateTime.MinValue;
+        private bool pendingPayoutYesClicked = false;
+        private PayoutStage pendingPayoutStage = PayoutStage.None;
         private bool pendingBroadcastRoll = false;
         private DateTime pendingBroadcastRollExpires = DateTime.MinValue;
         private readonly DateTime uiOpenBlockedUntil = DateTime.UtcNow.AddSeconds(5);
@@ -422,6 +460,7 @@ namespace FFXIVBingo4All
             FlushChatQueue();
             MaybeRefreshRoomState();
             UpdatePendingPayout();
+            UpdatePaidOutFromPayouts();
             if (!isOpen)
             {
                 parseRollsEnabled = false;
@@ -590,15 +629,36 @@ namespace FFXIVBingo4All
 
             ImGui.Separator();
             ImGui.Text("------------");
+            bool canPayout = CanPayoutTarget(out var payoutReason);
+            if (!canPayout)
+            {
+                ImGui.BeginDisabled();
+            }
             if (ImGui.Button("Payout"))
             {
                 HandlePayout();
+            }
+            if (!canPayout)
+            {
+                ImGui.EndDisabled();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel Pay"))
+            {
+                CancelPendingPayout();
             }
 
             if (!string.IsNullOrWhiteSpace(payoutStatus))
             {
                 ImGui.Text(payoutStatus);
             }
+            else if (!canPayout && !string.IsNullOrWhiteSpace(payoutReason))
+            {
+                ImGui.Text(payoutReason);
+            }
+
+            ImGui.Separator();
+            DrawPayoutsPanel();
         }
 
         private void DrawPlayerGenerator()
@@ -799,6 +859,105 @@ namespace FFXIVBingo4All
             }
         }
 
+        private void DrawPayoutsPanel()
+        {
+            ImGui.Text("Payouts");
+
+            if (bingoCallers.Count == 0)
+            {
+                ImGui.Text("No bingo calls yet.");
+                return;
+            }
+
+            int prizeSplit = GetPrizeSplit();
+            if (ImGui.BeginTable(
+                "payouts_table",
+                4,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.SizingFixedFit))
+            {
+                ImGui.TableSetupColumn("Player");
+                ImGui.TableSetupColumn("Paid");
+                ImGui.TableSetupColumn("Owed");
+                ImGui.TableSetupColumn("Status");
+                ImGui.TableHeadersRow();
+
+                foreach (var name in bingoCallers.OrderBy(n => n, StringComparer.OrdinalIgnoreCase))
+                {
+                    int paid = payoutPaid.TryGetValue(name, out var paidValue) ? paidValue : 0;
+                    int owed = prizeSplit;
+                    string status = paid >= owed ? "Paid" : "Pending";
+                    if (string.Equals(name, pendingPayoutName, StringComparison.OrdinalIgnoreCase) &&
+                        pendingPayoutStage != PayoutStage.None)
+                    {
+                        status = "In Progress";
+                    }
+
+                    ImGui.TableNextRow();
+                    ImGui.TableSetColumnIndex(0);
+                    ImGui.Text(name);
+                    ImGui.TableSetColumnIndex(1);
+                    ImGui.Text(FormatNumber(paid));
+                    ImGui.TableSetColumnIndex(2);
+                    ImGui.Text(FormatNumber(owed));
+                    ImGui.TableSetColumnIndex(3);
+                    ImGui.Text(status);
+                }
+
+                ImGui.EndTable();
+            }
+        }
+
+        private bool CanPayoutTarget(out string reason)
+        {
+            reason = string.Empty;
+            if (pendingPayoutStage != PayoutStage.None)
+            {
+                reason = $"Payout in progress for {pendingPayoutName}.";
+                return false;
+            }
+
+            if (bingoCallers.Count == 0)
+            {
+                reason = "No bingo calls yet.";
+                return false;
+            }
+
+            if (!TryGetTargetPlayerName(out var targetName))
+            {
+                reason = "Target a player to pay out.";
+                return false;
+            }
+
+            var normalized = NormalizePlayerName(targetName);
+            if (!bingoCallers.Contains(normalized))
+            {
+                reason = $"{targetName} has not called Bingo.";
+                return false;
+            }
+
+            int owed = GetPrizeSplit();
+            int paid = payoutPaid.TryGetValue(normalized, out var value) ? value : 0;
+            if (paid >= owed)
+            {
+                reason = $"{targetName} is already paid.";
+                return false;
+            }
+
+            return true;
+        }
+
+        private void CancelPendingPayout()
+        {
+            if (pendingPayoutStage == PayoutStage.None)
+            {
+                payoutStatus = "No payout in progress.";
+                return;
+            }
+
+            ClearPendingPayout();
+            payoutStatus = "Payout canceled.";
+        }
+
         private void DrawUiSettingsTab()
         {
             ImGui.Text("Skin Settings");
@@ -886,13 +1045,29 @@ namespace FFXIVBingo4All
             }
 
             var updates = new List<(string oldSeed, string playerName, int newCount)>();
-            var entries = gameState.IssuedCards.ToList();
+            var entries = gameState.IssuedCards
+                .Select(entry =>
+                {
+                    var playerKey = NormalizePlayerName(entry.Value.PlayerName);
+                    return new
+                    {
+                        entry.Key,
+                        entry.Value,
+                        PlayerKey = playerKey,
+                        IsPaidOut = paidOutCallers.Contains(playerKey),
+                        IsBingoCaller = bingoCallers.Contains(playerKey),
+                    };
+                })
+                .OrderByDescending(entry => entry.IsPaidOut || entry.IsBingoCaller)
+                .ThenByDescending(entry => entry.IsPaidOut)
+                .ThenBy(entry => entry.Value.PlayerName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
             foreach (var entry in entries)
             {
                 var seed = entry.Key;
                 var data = entry.Value;
-                var playerKey = NormalizePlayerName(data.PlayerName);
+                var playerKey = entry.PlayerKey;
                 var letters = NormalizeLetters(gameState.CustomHeaderLetters);
                 string link = !string.IsNullOrWhiteSpace(data.ShortCode)
                     ? BuildShortUrl(data.ShortCode)
@@ -1530,7 +1705,7 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            if (!string.IsNullOrWhiteSpace(pendingPayoutName))
+            if (pendingPayoutStage != PayoutStage.None)
             {
                 payoutStatus = $"Payout already in progress for {pendingPayoutName}.";
                 return;
@@ -1549,28 +1724,39 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            int totalCards = gameState.IssuedCards.Values.Sum(p => p.CardCount);
-            int totalPot = gameState.StartingPot + (totalCards * gameState.CostPerCard);
-            int prizePool = (int)MathF.Round(totalPot * (gameState.PrizePercentage / 100f));
-            int prizeSplit = prizePool / Math.Max(1, bingoCallers.Count);
+            int prizeSplit = GetPrizeSplit();
             if (prizeSplit <= 0)
             {
                 payoutStatus = "Prize split is 0.";
                 return;
             }
 
-            var chunks = BuildPayoutChunks(prizeSplit);
+            int paidAlready = payoutPaid.TryGetValue(normalized, out var paid) ? paid : 0;
+            if (paidAlready >= prizeSplit)
+            {
+                paidOutCallers.Add(normalized);
+                payoutStatus = $"{targetName} has already been paid.";
+                return;
+            }
+
+            int amountRemaining = prizeSplit - paidAlready;
+            var chunks = BuildPayoutChunks(amountRemaining);
             var chunkText = string.Join(", ", chunks.Select(FormatNumber));
             ImGui.SetClipboardText(chunkText);
             paidOutCallers.Remove(normalized);
-            var tradeCommand = $"/trade \"{targetName}\"";
-            if (!TrySendChatMessage(tradeCommand))
+            pendingPayoutChunks.Clear();
+            foreach (var chunk in chunks)
             {
-                payoutStatus = "Failed to send /trade.";
-                return;
+                pendingPayoutChunks.Enqueue(chunk);
             }
             pendingPayoutName = normalized;
-            pendingPayoutTradeOpenSeen = false;
+            pendingPayoutTargetName = targetName;
+            pendingPayoutChunk = 0;
+            pendingPayoutTargetTotal = prizeSplit;
+            pendingPayoutYesClicked = false;
+            pendingPayoutStage = PayoutStage.StartTrade;
+            pendingPayoutStartTime = DateTime.UtcNow;
+            pendingPayoutNextActionAt = DateTime.MinValue;
             payoutStatus = $"Payout started for {targetName}: {chunkText} gil (copied).";
         }
 
@@ -1862,6 +2048,46 @@ namespace FFXIVBingo4All
             return $"{letter}-{number}";
         }
 
+        private int GetPrizeSplit()
+        {
+            int totalCards = gameState.IssuedCards.Values.Sum(p => p.CardCount);
+            int totalPot = gameState.StartingPot + (totalCards * gameState.CostPerCard);
+            int prizePool = (int)MathF.Round(totalPot * (gameState.PrizePercentage / 100f));
+            int bingoCount = Math.Max(1, bingoCallers.Count);
+            return prizePool / bingoCount;
+        }
+
+        private void UpdatePaidOutFromPayouts()
+        {
+            if (bingoCallers.Count == 0)
+            {
+                paidOutCallers.Clear();
+                return;
+            }
+
+            int owed = GetPrizeSplit();
+            foreach (var name in bingoCallers)
+            {
+                if (pendingPayoutStage != PayoutStage.None &&
+                    string.Equals(name, pendingPayoutName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                int paid = payoutPaid.TryGetValue(name, out var value) ? value : 0;
+                if (paid >= owed)
+                {
+                    paidOutCallers.Add(name);
+                }
+                else
+                {
+                    paidOutCallers.Remove(name);
+                }
+            }
+
+            paidOutCallers.RemoveWhere(name => !bingoCallers.Contains(name));
+        }
+
         private string BuildSkinQueryString()
         {
             var bg = ColorToHex(gameState.BgColor);
@@ -1876,31 +2102,255 @@ namespace FFXIVBingo4All
 
         private void UpdatePendingPayout()
         {
-            if (string.IsNullOrWhiteSpace(pendingPayoutName))
+            if (pendingPayoutStage == PayoutStage.None)
             {
                 return;
             }
 
-            if (IsTradeAddonOpen())
-            {
-                pendingPayoutTradeOpenSeen = true;
-                return;
-            }
-
-            if (!pendingPayoutTradeOpenSeen)
+            if (DateTime.UtcNow < pendingPayoutNextActionAt)
             {
                 return;
             }
 
-            paidOutCallers.Add(pendingPayoutName);
-            payoutStatus = $"Payout complete for {pendingPayoutName}.";
-            pendingPayoutName = string.Empty;
-            pendingPayoutTradeOpenSeen = false;
+            if (pendingPayoutStage == PayoutStage.ReadyTrade ||
+                pendingPayoutStage == PayoutStage.WaitTradeClose)
+            {
+                TryConfirmTradeYesNo();
+            }
+
+            switch (pendingPayoutStage)
+            {
+                case PayoutStage.StartTrade:
+                    if (pendingPayoutChunks.Count == 0)
+                    {
+                        payoutStatus = "No payout chunks available.";
+                        ClearPendingPayout();
+                        return;
+                    }
+
+                    if (pendingPayoutChunk == 0 &&
+                        !pendingPayoutChunks.TryPeek(out pendingPayoutChunk))
+                    {
+                        payoutStatus = "No payout chunks available.";
+                        ClearPendingPayout();
+                        return;
+                    }
+
+                    pendingPayoutYesClicked = false;
+                    pendingPayoutStartTime = DateTime.UtcNow;
+                    pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(500);
+                    var tradeCommand = $"/trade \"{pendingPayoutTargetName}\"";
+                    if (!TrySendChatMessage(tradeCommand))
+                    {
+                        payoutStatus = "Failed to send /trade.";
+                        ClearPendingPayout();
+                        return;
+                    }
+                    payoutStatus = $"Trading {FormatNumber(pendingPayoutChunk)} gil...";
+                    pendingPayoutStage = PayoutStage.WaitTradeOpen;
+                    return;
+
+                case PayoutStage.WaitTradeOpen:
+                    if (IsTradeAddonOpen())
+                    {
+                        pendingPayoutStage = PayoutStage.OpenGilInput;
+                        pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(200);
+                        return;
+                    }
+                    if (DateTime.UtcNow - pendingPayoutStartTime > TimeSpan.FromSeconds(10))
+                    {
+                        payoutStatus = "Trade window did not open.";
+                        ClearPendingPayout();
+                    }
+                    return;
+
+                case PayoutStage.OpenGilInput:
+                    if (TryOpenTradeGilInput())
+                    {
+                        pendingPayoutStage = PayoutStage.SetGilInput;
+                        pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(200);
+                        return;
+                    }
+                    pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(200);
+                    return;
+
+                case PayoutStage.SetGilInput:
+                    if (TrySetNumericInput(pendingPayoutChunk))
+                    {
+                        pendingPayoutStage = PayoutStage.ReadyTrade;
+                        pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(200);
+                        return;
+                    }
+                    pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(200);
+                    return;
+
+                case PayoutStage.ReadyTrade:
+                    if (TryClickTradeReady())
+                    {
+                        pendingPayoutStage = PayoutStage.WaitTradeClose;
+                        pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(500);
+                        return;
+                    }
+                    pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(200);
+                    return;
+
+                case PayoutStage.WaitTradeClose:
+                    if (IsTradeAddonOpen())
+                    {
+                        pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(500);
+                        return;
+                    }
+
+                    bool chunkSucceeded = pendingPayoutYesClicked;
+                    if (chunkSucceeded)
+                    {
+                        if (pendingPayoutChunks.Count > 0)
+                        {
+                            pendingPayoutChunks.Dequeue();
+                        }
+
+                        if (!payoutPaid.TryGetValue(pendingPayoutName, out var paid))
+                        {
+                            paid = 0;
+                        }
+
+                        payoutPaid[pendingPayoutName] = paid + pendingPayoutChunk;
+                    }
+                    else
+                    {
+                        payoutStatus = "Trade canceled, retrying...";
+                    }
+
+                    pendingPayoutChunk = 0;
+                    pendingPayoutYesClicked = false;
+
+                    int owed = pendingPayoutTargetTotal;
+                    int paidTotal = payoutPaid.TryGetValue(pendingPayoutName, out var totalPaid)
+                        ? totalPaid
+                        : 0;
+                    if (paidTotal >= owed)
+                    {
+                        paidOutCallers.Add(pendingPayoutName);
+                        payoutStatus = $"Payout complete for {pendingPayoutName}.";
+                        ClearPendingPayout();
+                        return;
+                    }
+
+                    if (pendingPayoutChunks.Count > 0)
+                    {
+                        pendingPayoutStage = PayoutStage.StartTrade;
+                        pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(500);
+                        return;
+                    }
+
+                    payoutStatus = $"Payout complete for {pendingPayoutName}.";
+                    ClearPendingPayout();
+                    return;
+            }
         }
 
-        private bool IsTradeAddonOpen()
+        private unsafe bool IsTradeAddonOpen()
         {
-            return GameGui.GetAddonByName("Trade") != nint.Zero;
+            return GenericHelpers.TryGetAddonByName<AtkUnitBase>("Trade", out var addon) &&
+                GenericHelpers.IsAddonReady(addon);
+        }
+
+        private void ClearPendingPayout()
+        {
+            pendingPayoutName = string.Empty;
+            pendingPayoutTargetName = string.Empty;
+            pendingPayoutChunk = 0;
+            pendingPayoutTargetTotal = 0;
+            pendingPayoutChunks.Clear();
+            pendingPayoutNextActionAt = DateTime.MinValue;
+            pendingPayoutStartTime = DateTime.MinValue;
+            pendingPayoutLastYesNoAt = DateTime.MinValue;
+            pendingPayoutYesClicked = false;
+            pendingPayoutStage = PayoutStage.None;
+        }
+
+        private unsafe bool TryOpenTradeGilInput()
+        {
+            if (!TryGetTradeAddon(out var addon))
+            {
+                return false;
+            }
+
+            ECommonsCallback.Fire(addon, true, 2, ECommonsCallback.ZeroAtkValue);
+            return true;
+        }
+
+        private unsafe bool TrySetNumericInput(int amount)
+        {
+            if (amount < 0 || amount > 1_000_000)
+            {
+                return false;
+            }
+
+            if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>("InputNumeric", out var addon) ||
+                !GenericHelpers.IsAddonReady(addon))
+            {
+                return false;
+            }
+
+            ECommonsCallback.Fire(addon, true, amount);
+            return true;
+        }
+
+        private unsafe bool TryClickTradeReady()
+        {
+            if (!TryGetTradeAddon(out var addon))
+            {
+                return false;
+            }
+
+            var node = addon->UldManager.NodeList[3];
+            if (node == null)
+            {
+                return false;
+            }
+
+            var button = (AtkComponentButton*)((AtkResNode*)node)->GetComponent();
+            if (button == null || !button->IsEnabled)
+            {
+                return false;
+            }
+
+            var helper = new TradeAddonHelper(addon);
+            if (!helper.ClickReady(button))
+            {
+                return false;
+            }
+            return true;
+        }
+
+        private unsafe bool TryGetTradeAddon(out AtkUnitBase* addon)
+        {
+            addon = null;
+            if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>("Trade", out addon))
+            {
+                return false;
+            }
+
+            return GenericHelpers.IsAddonReady(addon);
+        }
+
+        private unsafe void TryConfirmTradeYesNo()
+        {
+            if (DateTime.UtcNow - pendingPayoutLastYesNoAt < TimeSpan.FromMilliseconds(500))
+            {
+                return;
+            }
+
+            if (!GenericHelpers.TryGetAddonByName<AtkUnitBase>("SelectYesno", out var addon) ||
+                !GenericHelpers.IsAddonReady(addon))
+            {
+                return;
+            }
+
+            pendingPayoutLastYesNoAt = DateTime.UtcNow;
+            pendingPayoutYesClicked = true;
+            new AddonMaster.SelectYesno(addon).Yes();
         }
 
         private void DebugChat(string message, bool isError = false)
@@ -2107,8 +2557,8 @@ namespace FFXIVBingo4All
             bingoCallers.Clear();
             paidOutCallers.Clear();
             payoutStatus = string.Empty;
-            pendingPayoutName = string.Empty;
-            pendingPayoutTradeOpenSeen = false;
+            ClearPendingPayout();
+            payoutPaid.Clear();
             lock (roomStateLock)
             {
                 roomDaubs.Clear();
@@ -2130,8 +2580,8 @@ namespace FFXIVBingo4All
             bingoCallers.Clear();
             paidOutCallers.Clear();
             payoutStatus = string.Empty;
-            pendingPayoutName = string.Empty;
-            pendingPayoutTradeOpenSeen = false;
+            ClearPendingPayout();
+            payoutPaid.Clear();
             lock (roomStateLock)
             {
                 roomDaubs.Clear();
@@ -2147,8 +2597,8 @@ namespace FFXIVBingo4All
             }
 
             gameState.RoomCode = roomCode;
-            pendingPayoutName = string.Empty;
-            pendingPayoutTradeOpenSeen = false;
+            ClearPendingPayout();
+            payoutPaid.Clear();
             _ = Task.Run(() => FetchRoomStateAsync(true));
         }
 
@@ -2495,6 +2945,13 @@ namespace FFXIVBingo4All
                     bingoCallers.Add(caller);
                 }
                 paidOutCallers.RemoveWhere(name => !bingoCallers.Contains(name));
+                foreach (var name in payoutPaid.Keys.ToList())
+                {
+                    if (!bingoCallers.Contains(name))
+                    {
+                        payoutPaid.Remove(name);
+                    }
+                }
             }
             catch (Exception)
             {
