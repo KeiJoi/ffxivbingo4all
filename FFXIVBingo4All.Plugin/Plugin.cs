@@ -13,6 +13,7 @@ using System.Globalization;
 using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Game.Command;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.IoC;
@@ -40,6 +41,7 @@ namespace FFXIVBingo4All
         [PluginService] private static IObjectTable ObjectTable { get; set; } = null!;
         [PluginService] private static ITargetManager TargetManager { get; set; } = null!;
         [PluginService] private static IPluginLog PluginLog { get; set; } = null!;
+        [PluginService] private static ICondition Condition { get; set; } = null!;
 
         private readonly HttpClient httpClient = new()
         {
@@ -63,6 +65,8 @@ namespace FFXIVBingo4All
         private readonly HashSet<string> bingoCallers = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> paidOutCallers = new(StringComparer.OrdinalIgnoreCase);
         private string payoutStatus = string.Empty;
+        private string pendingPayoutName = string.Empty;
+        private bool pendingPayoutTradeOpenSeen = false;
         private bool pendingBroadcastRoll = false;
         private DateTime pendingBroadcastRollExpires = DateTime.MinValue;
         private readonly DateTime uiOpenBlockedUntil = DateTime.UtcNow.AddSeconds(5);
@@ -418,6 +422,7 @@ namespace FFXIVBingo4All
         {
             FlushChatQueue();
             MaybeRefreshRoomState();
+            UpdatePendingPayout();
             if (!isOpen)
             {
                 parseRollsEnabled = false;
@@ -1526,6 +1531,12 @@ namespace FFXIVBingo4All
                 return;
             }
 
+            if (!string.IsNullOrWhiteSpace(pendingPayoutName))
+            {
+                payoutStatus = $"Payout already in progress for {pendingPayoutName}.";
+                return;
+            }
+
             if (!TryGetTargetPlayerName(out var targetName))
             {
                 payoutStatus = "Target a player to pay out.";
@@ -1552,9 +1563,10 @@ namespace FFXIVBingo4All
             var chunks = BuildPayoutChunks(prizeSplit);
             var chunkText = string.Join(", ", chunks.Select(FormatNumber));
             ImGui.SetClipboardText(chunkText);
-            TrySendChatMessage($"/trade {targetName}");
-            paidOutCallers.Add(normalized);
-            payoutStatus = $"Payout for {targetName}: {chunkText} gil (copied).";
+            TrySendChatMessage("/trade");
+            pendingPayoutName = normalized;
+            pendingPayoutTradeOpenSeen = false;
+            payoutStatus = $"Payout started for {targetName}: {chunkText} gil (copied).";
         }
 
         private static string ExtractFirstLastName(string? name)
@@ -1857,6 +1869,30 @@ namespace FFXIVBingo4All
             return $"bg={bg}&card={card}&header={header}&text={text}&daub={daub}&ball={ball}";
         }
 
+        private void UpdatePendingPayout()
+        {
+            if (string.IsNullOrWhiteSpace(pendingPayoutName))
+            {
+                return;
+            }
+
+            if (Condition[ConditionFlag.TradeOpen])
+            {
+                pendingPayoutTradeOpenSeen = true;
+                return;
+            }
+
+            if (!pendingPayoutTradeOpenSeen)
+            {
+                return;
+            }
+
+            paidOutCallers.Add(pendingPayoutName);
+            payoutStatus = $"Payout complete for {pendingPayoutName}.";
+            pendingPayoutName = string.Empty;
+            pendingPayoutTradeOpenSeen = false;
+        }
+
         private void DebugChat(string message, bool isError = false)
         {
             chatQueue.Enqueue(new QueuedChat(message, isError));
@@ -2061,6 +2097,8 @@ namespace FFXIVBingo4All
             bingoCallers.Clear();
             paidOutCallers.Clear();
             payoutStatus = string.Empty;
+            pendingPayoutName = string.Empty;
+            pendingPayoutTradeOpenSeen = false;
             lock (roomStateLock)
             {
                 roomDaubs.Clear();
@@ -2082,6 +2120,8 @@ namespace FFXIVBingo4All
             bingoCallers.Clear();
             paidOutCallers.Clear();
             payoutStatus = string.Empty;
+            pendingPayoutName = string.Empty;
+            pendingPayoutTradeOpenSeen = false;
             lock (roomStateLock)
             {
                 roomDaubs.Clear();
@@ -2097,6 +2137,8 @@ namespace FFXIVBingo4All
             }
 
             gameState.RoomCode = roomCode;
+            pendingPayoutName = string.Empty;
+            pendingPayoutTradeOpenSeen = false;
             _ = Task.Run(() => FetchRoomStateAsync(true));
         }
 
