@@ -14,6 +14,7 @@ using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Game.Command;
 using Dalamud.Game.ClientState.Objects.Types;
+using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -60,6 +61,7 @@ namespace FFXIVBingo4All
         private string lastRollStatus = string.Empty;
         private string lastPostStatus = string.Empty;
         private string lastGeneratedSeed = string.Empty;
+        private readonly DateTime uiOpenBlockedUntil = DateTime.UtcNow.AddSeconds(5);
         private readonly ConcurrentQueue<QueuedChat> chatQueue = new();
         private readonly HashSet<string> openPlayerCardWindows = new();
         private readonly Dictionary<string, Dictionary<int, HashSet<int>>> roomDaubs = new();
@@ -120,21 +122,21 @@ namespace FFXIVBingo4All
             roomKeyInput = configuration.RoomKey;
 
             ChatGui.ChatMessage += OnChatMessage;
-            CommandManager.AddHandler("/ffxivbingo4al", new CommandInfo(OnCommand)
+            CommandManager.AddHandler("/ffxivbingo4all", new CommandInfo(OnCommand)
             {
                 HelpMessage = "Open the FFXIV Bingo host window.",
             });
             PluginInterface.UiBuilder.Draw += Draw;
-            openConfigAction = () => isOpen = true;
+            openConfigAction = RequestOpenFromUiBuilder;
             PluginInterface.UiBuilder.OpenConfigUi += openConfigAction;
-            openMainAction = () => isOpen = true;
+            openMainAction = RequestOpenFromUiBuilder;
             PluginInterface.UiBuilder.OpenMainUi += openMainAction;
         }
 
         public void Dispose()
         {
             ChatGui.ChatMessage -= OnChatMessage;
-            CommandManager.RemoveHandler("/ffxivbingo4al");
+            CommandManager.RemoveHandler("/ffxivbingo4all");
             PluginInterface.UiBuilder.Draw -= Draw;
             PluginInterface.UiBuilder.OpenConfigUi -= openConfigAction;
             PluginInterface.UiBuilder.OpenMainUi -= openMainAction;
@@ -143,6 +145,15 @@ namespace FFXIVBingo4All
 
         private void OnCommand(string command, string args)
         {
+            isOpen = true;
+        }
+
+        private void RequestOpenFromUiBuilder()
+        {
+            if (DateTime.UtcNow < uiOpenBlockedUntil)
+            {
+                return;
+            }
             isOpen = true;
         }
 
@@ -373,6 +384,8 @@ namespace FFXIVBingo4All
             ImGui.Separator();
             DrawSettings();
             ImGui.Separator();
+            DrawCallStatus();
+            ImGui.Separator();
             DrawPlayerGenerator();
 
             ImGui.End();
@@ -553,6 +566,10 @@ namespace FFXIVBingo4All
                 {
                     playerStatus = "Target a player to fill the name.";
                 }
+                else if (target.ObjectKind != ObjectKind.Player)
+                {
+                    playerStatus = "Target must be a player.";
+                }
                 else
                 {
                     var targetName = ExtractFirstLastName(target.Name.TextValue);
@@ -642,6 +659,26 @@ namespace FFXIVBingo4All
             if (ImGui.Button("Players Window"))
             {
                 showPlayersWindow = true;
+            }
+        }
+
+        private void DrawCallStatus()
+        {
+            ImGui.Text("Call Status");
+
+            if (string.Equals(lastRollStatus, "DUPLICATE NUMBER", StringComparison.OrdinalIgnoreCase))
+            {
+                ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), "DUPLICATE NUMBER");
+            }
+
+            if (!string.IsNullOrWhiteSpace(lastRollStatus))
+            {
+                ImGui.Text($"Last Roll: {lastRollStatus}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(lastPostStatus))
+            {
+                ImGui.Text($"Last Send: {lastPostStatus}");
             }
         }
 

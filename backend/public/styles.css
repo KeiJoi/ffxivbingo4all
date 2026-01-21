@@ -42,9 +42,8 @@
   --card-header-font: calc(14px * var(--card-scale));
   --card-ball-font: calc(16px * var(--card-scale));
   --free-font: calc(12px * var(--card-scale));
-  --cards-per-row: 12;
-  --called-ball-size: calc(var(--card-size) * 0.32);
-  --called-ball-font: calc(var(--called-ball-size) * 0.45);
+  --called-ball-size: clamp(28px, 4vmin, 64px);
+  --called-ball-font: clamp(14px, 2.2vmin, 26px);
 }
 
 * {
@@ -110,70 +109,6 @@ header h1 {
   font-size: 13px;
   letter-spacing: 1px;
   text-transform: uppercase;
-}
-
-.called-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.called-controls {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.card-controls {
-  display: grid;
-  gap: 8px;
-  min-width: 140px;
-  align-content: start;
-}
-
-.cards-per-row {
-  display: grid;
-  gap: 4px;
-  font-size: 11px;
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-}
-
-.cards-per-row select {
-  background: var(--header-bg);
-  color: var(--text-color);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  padding: 4px 6px;
-  font-size: 12px;
-}
-
-.card-size-controls {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 6px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 999px;
-  padding: 4px 6px;
-}
-
-.card-size-controls button {
-  background: var(--header-bg);
-  color: var(--text-color);
-  border: none;
-  border-radius: 999px;
-  width: 24px;
-  height: 24px;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.card-size-controls span {
-  text-align: center;
-  font-size: 12px;
 }
 
 .pot-display {
@@ -277,10 +212,6 @@ header h1 {
   gap: var(--card-gap);
   justify-content: center;
   grid-template-columns: repeat(auto-fit, minmax(var(--card-size), 1fr));
-  max-width: calc(
-    (var(--cards-per-row) * var(--card-size)) +
-      ((var(--cards-per-row) - 1) * var(--card-gap))
-  );
   margin: 0 auto;
 }
 
@@ -394,15 +325,6 @@ header h1 {
 
   .meta {
     text-align: left;
-  }
-
-  .called-controls {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .card-controls {
-    width: 100%;
   }
 
   .called-grid {

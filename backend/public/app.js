@@ -64,10 +64,6 @@ const bingoListEl = document.getElementById("bingo-list");
 const potDisplayEl = document.getElementById("pot-display");
 const playerNameEl = document.getElementById("player-name");
 const pageTitleEl = document.querySelector("header h1");
-const cardsPerRowSelect = document.getElementById("cards-per-row");
-const cardSizeDown = document.getElementById("card-size-down");
-const cardSizeUp = document.getElementById("card-size-up");
-const cardSizeLabel = document.getElementById("card-size-label");
 const roomCode = params.get("room") || masterSeed;
 let socket = null;
 let hasBingo = false;
@@ -101,7 +97,6 @@ if (playerNameEl) {
 const CARD_SCALE_MIN = 0.6;
 const CARD_SCALE_MAX = 1.6;
 const CARD_SCALE_STEP = 0.1;
-const DEFAULT_CARDS_PER_ROW = 12;
 
 let cardScale = Number(localStorage.getItem("bingo.cardScale") || "1");
 if (!Number.isFinite(cardScale)) {
@@ -109,78 +104,14 @@ if (!Number.isFinite(cardScale)) {
 }
 cardScale = Math.min(Math.max(cardScale, CARD_SCALE_MIN), CARD_SCALE_MAX);
 
-let cardsPerRow = Number(
-  localStorage.getItem("bingo.cardsPerRow") || DEFAULT_CARDS_PER_ROW
-);
-if (!Number.isFinite(cardsPerRow)) {
-  cardsPerRow = DEFAULT_CARDS_PER_ROW;
-}
-cardsPerRow = Math.min(Math.max(Math.round(cardsPerRow), 1), 16);
-
 function applyCardScale() {
   document.documentElement.style.setProperty(
     "--card-scale",
     cardScale.toFixed(2)
   );
-  if (cardSizeLabel) {
-    cardSizeLabel.textContent = `${Math.round(cardScale * 100)}%`;
-  }
-  if (cardSizeDown) {
-    cardSizeDown.disabled = cardScale <= CARD_SCALE_MIN + 0.01;
-  }
-  if (cardSizeUp) {
-    cardSizeUp.disabled = cardScale >= CARD_SCALE_MAX - 0.01;
-  }
-}
-
-function applyCardsPerRow() {
-  document.documentElement.style.setProperty(
-    "--cards-per-row",
-    String(cardsPerRow)
-  );
-  if (cardsPerRowSelect) {
-    cardsPerRowSelect.value = String(cardsPerRow);
-  }
 }
 
 applyCardScale();
-applyCardsPerRow();
-
-if (cardsPerRowSelect) {
-  cardsPerRowSelect.innerHTML = "";
-  for (let i = 1; i <= 16; i += 1) {
-    const option = document.createElement("option");
-    option.value = String(i);
-    option.textContent = String(i);
-    cardsPerRowSelect.appendChild(option);
-  }
-  cardsPerRowSelect.value = String(cardsPerRow);
-  cardsPerRowSelect.addEventListener("change", () => {
-    const next = Number(cardsPerRowSelect.value);
-    if (!Number.isFinite(next)) {
-      return;
-    }
-    cardsPerRow = Math.min(Math.max(Math.round(next), 1), 16);
-    localStorage.setItem("bingo.cardsPerRow", String(cardsPerRow));
-    applyCardsPerRow();
-  });
-}
-
-if (cardSizeDown) {
-  cardSizeDown.addEventListener("click", () => {
-    cardScale = Math.max(CARD_SCALE_MIN, cardScale - CARD_SCALE_STEP);
-    localStorage.setItem("bingo.cardScale", String(cardScale));
-    applyCardScale();
-  });
-}
-
-if (cardSizeUp) {
-  cardSizeUp.addEventListener("click", () => {
-    cardScale = Math.min(CARD_SCALE_MAX, cardScale + CARD_SCALE_STEP);
-    localStorage.setItem("bingo.cardScale", String(cardScale));
-    applyCardScale();
-  });
-}
 
 function setBingoBanner(message) {
   if (!bingoBanner) {
