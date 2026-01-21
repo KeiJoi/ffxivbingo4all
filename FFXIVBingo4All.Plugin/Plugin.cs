@@ -443,9 +443,23 @@ namespace FFXIVBingo4All
             int prizePool = (int)MathF.Round(totalPot * (gameState.PrizePercentage / 100f));
             int houseCut = Math.Max(0, totalPot - prizePool);
 
-            ImGui.Text("Game Status");
-            if (ImGui.BeginTable("game_stats", 2, ImGuiTableFlags.SizingFixedFit))
+            const string title = "Game Status";
+            float titleWidth = ImGui.CalcTextSize(title).X;
+            float available = ImGui.GetContentRegionAvail().X;
+            float cursorX = ImGui.GetCursorPosX();
+            if (available > titleWidth)
             {
+                ImGui.SetCursorPosX(cursorX + (available - titleWidth) * 0.5f);
+            }
+            ImGui.Text(title);
+
+            float gapWidth = ImGui.CalcTextSize(new string('M', 20)).X;
+            if (ImGui.BeginTable("game_stats", 3, ImGuiTableFlags.SizingFixedFit))
+            {
+                ImGui.TableSetupColumn("left", ImGuiTableColumnFlags.WidthFixed);
+                ImGui.TableSetupColumn("gap", ImGuiTableColumnFlags.WidthFixed, gapWidth);
+                ImGui.TableSetupColumn("right", ImGuiTableColumnFlags.WidthFixed);
+
                 ImGui.TableNextColumn();
                 ImGui.Text($"Ticket Cost: {FormatNumber(gameState.CostPerCard)}");
                 ImGui.Text($"Starting Pot: {FormatNumber(gameState.StartingPot)}");
@@ -453,6 +467,9 @@ namespace FFXIVBingo4All
                 ImGui.Text($"Prize Pool: {FormatNumber(prizePool)}");
                 ImGui.Text($"House Cut: {FormatNumber(houseCut)}");
                 ImGui.Text($"Prize Percentage: {gameState.PrizePercentage:0.##}%");
+
+                ImGui.TableNextColumn();
+                ImGui.Dummy(new Vector2(gapWidth, 0));
 
                 ImGui.TableNextColumn();
                 ImGui.Text($"Total Cards Sold: {FormatNumber(totalCards)}");
