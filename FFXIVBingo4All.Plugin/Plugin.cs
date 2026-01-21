@@ -13,7 +13,6 @@ using System.Globalization;
 using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Game.Command;
-using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Game.ClientState.Objects.Enums;
 using Dalamud.IoC;
@@ -41,7 +40,7 @@ namespace FFXIVBingo4All
         [PluginService] private static IObjectTable ObjectTable { get; set; } = null!;
         [PluginService] private static ITargetManager TargetManager { get; set; } = null!;
         [PluginService] private static IPluginLog PluginLog { get; set; } = null!;
-        [PluginService] private static ICondition Condition { get; set; } = null!;
+        [PluginService] private static IGameGui GameGui { get; set; } = null!;
 
         private readonly HttpClient httpClient = new()
         {
@@ -1563,7 +1562,13 @@ namespace FFXIVBingo4All
             var chunks = BuildPayoutChunks(prizeSplit);
             var chunkText = string.Join(", ", chunks.Select(FormatNumber));
             ImGui.SetClipboardText(chunkText);
-            TrySendChatMessage("/trade");
+            paidOutCallers.Remove(normalized);
+            var tradeCommand = $"/trade \"{targetName}\"";
+            if (!TrySendChatMessage(tradeCommand))
+            {
+                payoutStatus = "Failed to send /trade.";
+                return;
+            }
             pendingPayoutName = normalized;
             pendingPayoutTradeOpenSeen = false;
             payoutStatus = $"Payout started for {targetName}: {chunkText} gil (copied).";
@@ -1876,7 +1881,7 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            if (Condition[ConditionFlag.TradeOpen])
+            if (IsTradeAddonOpen())
             {
                 pendingPayoutTradeOpenSeen = true;
                 return;
@@ -1891,6 +1896,11 @@ namespace FFXIVBingo4All
             payoutStatus = $"Payout complete for {pendingPayoutName}.";
             pendingPayoutName = string.Empty;
             pendingPayoutTradeOpenSeen = false;
+        }
+
+        private bool IsTradeAddonOpen()
+        {
+            return GameGui.GetAddonByName("Trade") != nint.Zero;
         }
 
         private void DebugChat(string message, bool isError = false)
