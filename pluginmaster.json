@@ -3,7 +3,7 @@
     "Author": "Kei Joi",
     "Name": "FFXIV Bingo 4 All",
     "InternalName": "FFXIVBingo4All",
-    "AssemblyVersion": "0.3.2.1",
+    "AssemblyVersion": "1.0.0.0",
     "Description": "Host relay plugin for multi-card bingo.",
     "ApplicableVersion": "any",
     "RepoUrl": "https://github.com/KeiJoi/ffxivbingo4all",
@@ -18,7 +18,7 @@
     "DownloadLinkTestingUpdate": "https://raw.githubusercontent.com/KeiJoi/ffxivbingo4all/main/FFXIVBingo4All.zip",
     "IsHide": false,
     "IsTestingExclusive": false,
-    "LastUpdate": 1769018145
+    "LastUpdate": 1769018604
   },
   {
     "Author": "Kei Joi",
