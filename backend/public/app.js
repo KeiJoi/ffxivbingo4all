@@ -64,6 +64,9 @@ const bingoListEl = document.getElementById("bingo-list");
 const potDisplayEl = document.getElementById("pot-display");
 const playerNameEl = document.getElementById("player-name");
 const pageTitleEl = document.querySelector("header h1");
+const cardSizeDown = document.getElementById("card-size-down");
+const cardSizeUp = document.getElementById("card-size-up");
+const cardSizeLabel = document.getElementById("card-size-label");
 const roomCode = params.get("room") || masterSeed;
 let socket = null;
 let hasBingo = false;
@@ -94,6 +97,7 @@ if (playerNameEl) {
     : "Player: Guest";
 }
 
+const CARD_BASE_SIZE = 220;
 const CARD_SCALE_MIN = 0.6;
 const CARD_SCALE_MAX = 1.6;
 const CARD_SCALE_STEP = 0.1;
@@ -109,9 +113,38 @@ function applyCardScale() {
     "--card-scale",
     cardScale.toFixed(2)
   );
+  document.documentElement.style.setProperty(
+    "--card-size",
+    `${Math.round(CARD_BASE_SIZE * cardScale)}px`
+  );
+  if (cardSizeLabel) {
+    cardSizeLabel.textContent = `${Math.round(cardScale * 100)}%`;
+  }
+  if (cardSizeDown) {
+    cardSizeDown.disabled = cardScale <= CARD_SCALE_MIN + 0.01;
+  }
+  if (cardSizeUp) {
+    cardSizeUp.disabled = cardScale >= CARD_SCALE_MAX - 0.01;
+  }
 }
 
 applyCardScale();
+
+if (cardSizeDown) {
+  cardSizeDown.addEventListener("click", () => {
+    cardScale = Math.max(CARD_SCALE_MIN, cardScale - CARD_SCALE_STEP);
+    localStorage.setItem("bingo.cardScale", String(cardScale));
+    applyCardScale();
+  });
+}
+
+if (cardSizeUp) {
+  cardSizeUp.addEventListener("click", () => {
+    cardScale = Math.min(CARD_SCALE_MAX, cardScale + CARD_SCALE_STEP);
+    localStorage.setItem("bingo.cardScale", String(cardScale));
+    applyCardScale();
+  });
+}
 
 function setBingoBanner(message) {
   if (!bingoBanner) {

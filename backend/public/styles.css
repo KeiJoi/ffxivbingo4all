@@ -34,8 +34,7 @@
   --ball-color: #f3f3f3;
   --ball-text: #121417;
   --card-scale: 1;
-  --card-base-size: 220px;
-  --card-size: calc(var(--card-base-size) * var(--card-scale));
+  --card-size: 220px;
   --card-gap: 16px;
   --card-padding: calc(12px * var(--card-scale));
   --card-grid-gap: calc(4px * var(--card-scale));
@@ -114,6 +113,34 @@ header h1 {
 .pot-display {
   font-size: 12px;
   opacity: 0.85;
+}
+
+.card-size-panel {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--header-bg);
+  border-radius: 999px;
+  padding: 6px 10px;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.25);
+}
+
+.card-size-panel button {
+  background: var(--card-bg);
+  color: var(--text-color);
+  border: none;
+  border-radius: 999px;
+  width: 26px;
+  height: 26px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.card-size-panel span {
+  min-width: 48px;
+  text-align: center;
+  font-size: 12px;
 }
 
 .bingo-panel {
@@ -222,7 +249,8 @@ header h1 {
   display: grid;
   gap: calc(8px * var(--card-scale));
   box-shadow: 0 12px 24px var(--card-shadow);
-  width: min(100%, var(--card-size));
+  width: 100%;
+  max-width: var(--card-size);
   justify-self: center;
 }
 
@@ -325,6 +353,11 @@ header h1 {
 
   .meta {
     text-align: left;
+  }
+
+  .card-size-panel {
+    width: 100%;
+    justify-content: center;
   }
 
   .called-grid {
