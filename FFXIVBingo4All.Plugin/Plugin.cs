@@ -9,8 +9,11 @@ using System.Threading.Tasks;
 using System.Numerics;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using System.Globalization;
 using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
+using Dalamud.Game.Command;
+using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -20,8 +23,8 @@ namespace FFXIVBingo4All
 {
     public sealed class Plugin : IDalamudPlugin
     {
-        private const string DefaultServerBaseUrl = "http://localhost:3000";
-        private const string DefaultClientBaseUrl = "http://localhost:3000";
+        private const string DefaultServerBaseUrl = "https://ffxivbingo4all.onrender.com";
+        private const string DefaultClientBaseUrl = "https://ffxivbingo4all.onrender.com";
         private static readonly Regex RollRegex =
             new(
                 @"(?:Random!\s*)?You roll a (\d+)\s*\((?:1\s*-\s*75|out of 75)\)\.?",
@@ -33,6 +36,7 @@ namespace FFXIVBingo4All
         [PluginService] private static IChatGui ChatGui { get; set; } = null!;
         [PluginService] private static ICommandManager CommandManager { get; set; } = null!;
         [PluginService] private static IObjectTable ObjectTable { get; set; } = null!;
+        [PluginService] private static ITargetManager TargetManager { get; set; } = null!;
         [PluginService] private static IPluginLog PluginLog { get; set; } = null!;
 
         private readonly HttpClient httpClient = new()
@@ -41,9 +45,10 @@ namespace FFXIVBingo4All
         };
 
         private Configuration configuration = null!;
+        private GameState gameState = new();
         private readonly Action openConfigAction;
         private readonly Action openMainAction;
-        private bool isOpen = true;
+        private bool isOpen = false;
         private bool showPlayersWindow = false;
         private bool showWebSettingsWindow = false;
         private bool showResetPopup = false;
@@ -51,11 +56,12 @@ namespace FFXIVBingo4All
         private bool showCalledBallsWindow = false;
         private bool showStartPopup = false;
         private bool showSkinWindow = false;
-        private bool startRequested = false;
+        private bool parseRollsEnabled = false;
         private string lastRollStatus = string.Empty;
         private string lastPostStatus = string.Empty;
         private string lastGeneratedSeed = string.Empty;
         private readonly ConcurrentQueue<QueuedChat> chatQueue = new();
+        private readonly HashSet<string> openPlayerCardWindows = new();
         private readonly Dictionary<string, Dictionary<int, HashSet<int>>> roomDaubs = new();
         private readonly object roomStateLock = new();
         private DateTime lastRoomStateFetch = DateTime.MinValue;
@@ -78,10 +84,11 @@ namespace FFXIVBingo4All
         private string playerName = string.Empty;
         private int playerCardCount = 1;
         private string generatedLink = string.Empty;
-        private int manualNumber = 1;
+        private string playerStatus = string.Empty;
         private string webServerUrlInput = string.Empty;
         private string webClientUrlInput = string.Empty;
         private string adminKeyInput = string.Empty;
+        private string roomKeyInput = string.Empty;
         private readonly object adminRoomsLock = new();
         private List<AdminRoomInfo> adminRooms = new();
         private bool adminRoomsLoading = false;
@@ -110,28 +117,33 @@ namespace FFXIVBingo4All
             webServerUrlInput = configuration.ServerBaseUrl;
             webClientUrlInput = configuration.ClientBaseUrl;
             adminKeyInput = configuration.AdminKey;
+            roomKeyInput = configuration.RoomKey;
 
             ChatGui.ChatMessage += OnChatMessage;
+            CommandManager.AddHandler("/ffxivbingo4al", new CommandInfo(OnCommand)
+            {
+                HelpMessage = "Open the FFXIV Bingo host window.",
+            });
             PluginInterface.UiBuilder.Draw += Draw;
             openConfigAction = () => isOpen = true;
             PluginInterface.UiBuilder.OpenConfigUi += openConfigAction;
             openMainAction = () => isOpen = true;
             PluginInterface.UiBuilder.OpenMainUi += openMainAction;
-
-            if (configuration.BingoActive &&
-                (configuration.CalledNumbers.Count > 0 || configuration.IssuedCards.Count > 0))
-            {
-                _ = Task.Run(SyncHostStateAsync);
-            }
         }
 
         public void Dispose()
         {
             ChatGui.ChatMessage -= OnChatMessage;
+            CommandManager.RemoveHandler("/ffxivbingo4al");
             PluginInterface.UiBuilder.Draw -= Draw;
             PluginInterface.UiBuilder.OpenConfigUi -= openConfigAction;
             PluginInterface.UiBuilder.OpenMainUi -= openMainAction;
             httpClient.Dispose();
+        }
+
+        private void OnCommand(string command, string args)
+        {
+            isOpen = true;
         }
 
         private void OnChatMessage(
@@ -141,7 +153,7 @@ namespace FFXIVBingo4All
             ref SeString message,
             ref bool isHandled)
         {
-            if (!configuration.BingoActive)
+            if (!parseRollsEnabled)
             {
                 return;
             }
@@ -176,16 +188,15 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            manualNumber = rolled;
             DebugChat($"Roll detected: {rolled} (sender: {senderName}, type: {type})");
             TryHandleCallNumber(rolled, "roll");
         }
 
         private bool TryHandleCallNumber(int number, string source)
         {
-            if (!configuration.BingoActive)
+            if (string.IsNullOrWhiteSpace(gameState.RoomCode))
             {
-                lastRollStatus = "Bingo is stopped.";
+                lastRollStatus = "No active room.";
                 return false;
             }
 
@@ -195,15 +206,14 @@ namespace FFXIVBingo4All
                 return false;
             }
 
-            if (configuration.CalledNumbers.Contains(number))
+            if (gameState.CalledNumbers.Contains(number))
             {
                 ChatGui.PrintError("DUPLICATE ROLL! Reroll.");
                 lastRollStatus = "DUPLICATE NUMBER";
                 return false;
             }
 
-            configuration.CalledNumbers.Add(number);
-            configuration.Save();
+            gameState.CalledNumbers.Add(number);
             lastRollStatus = $"Called {number} ({source}).";
 
             _ = Task.Run(() => PostCallNumberAsync(number));
@@ -237,38 +247,57 @@ namespace FFXIVBingo4All
 
         private async Task SyncHostStateAsync()
         {
-            if (!configuration.BingoActive)
-            {
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(configuration.CurrentRoomCode))
+            if (string.IsNullOrWhiteSpace(gameState.RoomCode))
             {
                 lastPostStatus = "Missing room code.";
                 DebugChat("Missing room code for host sync.");
                 return;
             }
 
+            var roomKey = configuration.RoomKey?.Trim();
+            if (string.IsNullOrWhiteSpace(roomKey))
+            {
+                lastPostStatus = "Missing room key.";
+                DebugChat("Missing room key for host sync.");
+                return;
+            }
+
             var payload = new
             {
-                roomCode = configuration.CurrentRoomCode,
-                calledNumbers = configuration.CalledNumbers,
-                allowedSeeds = configuration.IssuedCards.Keys.ToList(),
-                allowedCards = configuration.IssuedCards.ToDictionary(
+                roomCode = gameState.RoomCode,
+                roomKey,
+                calledNumbers = gameState.CalledNumbers,
+                allowedCards = gameState.IssuedCards.ToDictionary(
                     entry => entry.Key,
                     entry => Math.Clamp(entry.Value.CardCount, 1, 16)),
-                costPerCard = configuration.CostPerCard,
-                startingPot = configuration.StartingPot,
-                prizePercentage = configuration.PrizePercentage,
-                gameType = configuration.GameType,
+                players = gameState.IssuedCards.ToDictionary(
+                    entry => entry.Key,
+                    entry => new
+                    {
+                        name = entry.Value.PlayerName,
+                        count = Math.Clamp(entry.Value.CardCount, 1, 16),
+                        shortCode = entry.Value.ShortCode,
+                    }),
+                costPerCard = gameState.CostPerCard,
+                startingPot = gameState.StartingPot,
+                prizePercentage = gameState.PrizePercentage,
+                gameType = gameState.GameType,
+                letters = NormalizeLetters(gameState.CustomHeaderLetters),
+                title = gameState.VenueName,
+                bg = ColorToHex(gameState.BgColor),
+                card = ColorToHex(gameState.CardColor),
+                header = ColorToHex(gameState.HeaderColor),
+                text = ColorToHex(gameState.TextColor),
+                daub = ColorToHex(gameState.DaubColor),
+                ball = ColorToHex(gameState.BallColor),
             };
 
             PluginLog.Information(
                 "Host sync: room={Room} count={Count}",
-                configuration.CurrentRoomCode,
-                configuration.CalledNumbers.Count);
+                gameState.RoomCode,
+                gameState.CalledNumbers.Count);
             DebugChat(
-                $"Host sync: room {configuration.CurrentRoomCode}, {configuration.CalledNumbers.Count} numbers.");
+                $"Host sync: room {gameState.RoomCode}, {gameState.CalledNumbers.Count} numbers.");
             var ok = await PostJsonAsync("/api/host-sync", payload).ConfigureAwait(false);
             lastPostStatus = ok ? "Host sync ok." : "Host sync failed.";
             DebugChat(ok ? "Host sync complete." : "Host sync failed.");
@@ -276,12 +305,7 @@ namespace FFXIVBingo4All
 
         private async Task PostCallNumberAsync(int number)
         {
-            if (!configuration.BingoActive)
-            {
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(configuration.CurrentRoomCode))
+            if (string.IsNullOrWhiteSpace(gameState.RoomCode))
             {
                 lastPostStatus = "Missing room code.";
                 DebugChat("Missing room code for call number.");
@@ -290,16 +314,16 @@ namespace FFXIVBingo4All
 
             var payload = new
             {
-                roomCode = configuration.CurrentRoomCode,
+                roomCode = gameState.RoomCode,
                 number,
             };
 
             PluginLog.Information(
                 "Call number: room={Room} number={Number}",
-                configuration.CurrentRoomCode,
+                gameState.RoomCode,
                 number);
             lastPostStatus = $"Posting {number}...";
-            DebugChat($"Posting {number} to room {configuration.CurrentRoomCode}...");
+            DebugChat($"Posting {number} to room {gameState.RoomCode}...");
             var ok = await PostJsonAsync("/api/call-number", payload).ConfigureAwait(false);
             lastPostStatus = ok ? $"Posted {number}." : $"Post failed ({number}).";
             DebugChat(ok ? $"Posted {number}." : $"Failed to post {number}.");
@@ -335,6 +359,7 @@ namespace FFXIVBingo4All
             MaybeRefreshRoomState();
             if (!isOpen)
             {
+                parseRollsEnabled = false;
                 return;
             }
 
@@ -349,12 +374,11 @@ namespace FFXIVBingo4All
             DrawSettings();
             ImGui.Separator();
             DrawPlayerGenerator();
-            ImGui.Separator();
-            DrawManualControl();
 
             ImGui.End();
 
             DrawPlayersWindow();
+            DrawPlayerCardWindows();
             DrawWebSettingsWindow();
             DrawServerRoomsWindow();
             DrawCalledBallsWindow();
@@ -364,16 +388,19 @@ namespace FFXIVBingo4All
 
         private void DrawStats()
         {
-            int totalCards = configuration.IssuedCards.Values.Sum(p => p.CardCount);
-            int totalPot = configuration.StartingPot + (totalCards * configuration.CostPerCard);
-            float prizePool = totalPot * (configuration.PrizePercentage / 100f);
+            int totalCards = gameState.IssuedCards.Values.Sum(p => p.CardCount);
+            int totalPot = gameState.StartingPot + (totalCards * gameState.CostPerCard);
+            int prizePool = (int)MathF.Round(totalPot * (gameState.PrizePercentage / 100f));
 
             ImGui.Text("Stats Dashboard");
-            ImGui.Text($"Total Cards Sold: {totalCards}");
-            ImGui.Text($"Total Pot: {totalPot}");
-            ImGui.Text($"Prize Pool: {prizePool:0.##}");
-            ImGui.Text($"Status: {(configuration.BingoActive ? "Running" : "Stopped")}");
-            ImGui.Text($"Game Type: {configuration.GameType}");
+            ImGui.Text($"Ticket Cost: {FormatNumber(gameState.CostPerCard)}");
+            ImGui.Text($"Starting Pot: {FormatNumber(gameState.StartingPot)}");
+            ImGui.Text($"Total Cards Sold: {FormatNumber(totalCards)}");
+            ImGui.Text($"Total Pot: {FormatNumber(totalPot)}");
+            ImGui.Text($"Prize Pool: {FormatNumber(prizePool)}");
+            ImGui.Text($"Prize Percentage: {gameState.PrizePercentage:0.##}%");
+            ImGui.Text($"Roll Parse: {(parseRollsEnabled ? "On" : "Off")}");
+            ImGui.Text($"Game Type: {gameState.GameType}");
             if (!string.IsNullOrWhiteSpace(lastBingoDisplay))
             {
                 ImGui.TextColored(
@@ -385,80 +412,80 @@ namespace FFXIVBingo4All
         private void DrawSettings()
         {
             ImGui.Text("Settings");
-            bool changed = false;
+            bool changedGame = false;
+            bool roomCodeChanged = false;
 
-            string roomCode = configuration.CurrentRoomCode;
+            string roomCode = gameState.RoomCode;
             if (ImGui.InputText("Current Room Code", ref roomCode, 64))
             {
-                configuration.CurrentRoomCode = roomCode.Trim();
-                changed = true;
+                gameState.RoomCode = roomCode.Trim();
+                roomCodeChanged = true;
             }
 
-            bool bingoActive = configuration.BingoActive;
-            if (ImGui.Checkbox("Bingo Active", ref bingoActive))
+            bool parseEnabled = parseRollsEnabled;
+            if (ImGui.Checkbox("Parse /random 75", ref parseEnabled))
             {
-                if (bingoActive)
-                {
-                    configuration.BingoActive = true;
-                    configuration.Save();
-                    startRequested = true;
-                    OpenStartPopup();
-                    lastRollStatus = "Select Start New Game or Resume.";
-                }
-                else
-                {
-                    StopBingo();
-                }
+                parseRollsEnabled = parseEnabled;
             }
 
-            int cost = configuration.CostPerCard;
+            ImGui.SameLine();
+            if (ImGui.Button("Room Control"))
+            {
+                OpenStartPopup();
+                lastRollStatus = "Select Start New Game or Resume.";
+            }
+
+            if (string.IsNullOrWhiteSpace(configuration.RoomKey))
+            {
+                ImGui.TextColored(
+                    new Vector4(1f, 0.35f, 0.35f, 1f),
+                    "Room key is required to start or resume games.");
+            }
+
+            int cost = gameState.CostPerCard;
             if (ImGui.InputInt("Cost Per Card", ref cost))
             {
-                configuration.CostPerCard = Math.Max(0, cost);
-                changed = true;
+                gameState.CostPerCard = Math.Max(0, cost);
+                changedGame = true;
             }
 
-            int startingPot = configuration.StartingPot;
+            int startingPot = gameState.StartingPot;
             if (ImGui.InputInt("Starting Pot", ref startingPot))
             {
-                configuration.StartingPot = Math.Max(0, startingPot);
-                changed = true;
+                gameState.StartingPot = Math.Max(0, startingPot);
+                changedGame = true;
             }
 
-            float percentage = configuration.PrizePercentage;
+            float percentage = gameState.PrizePercentage;
             if (ImGui.InputFloat("Prize Percentage", ref percentage, 0f, 0f, "%.1f"))
             {
-                configuration.PrizePercentage = Math.Clamp(percentage, 0f, 100f);
-                changed = true;
+                gameState.PrizePercentage = Math.Clamp(percentage, 0f, 100f);
+                changedGame = true;
             }
 
-            string letters = configuration.CustomHeaderLetters;
+            string letters = gameState.CustomHeaderLetters;
             if (ImGui.InputText("Custom Letters", ref letters, 6))
             {
-                configuration.CustomHeaderLetters = NormalizeLetters(letters);
-                changed = true;
+                gameState.CustomHeaderLetters = NormalizeLetters(letters);
+                changedGame = true;
             }
 
-            string venueName = configuration.VenueName;
+            string venueName = gameState.VenueName;
             if (ImGui.InputText("Venue/Event", ref venueName, 64))
             {
-                configuration.VenueName = venueName.Trim();
-                changed = true;
+                gameState.VenueName = venueName.Trim();
+                changedGame = true;
             }
 
-            int currentGameIndex = Array.IndexOf(GameTypes, configuration.GameType);
+            int currentGameIndex = Array.IndexOf(GameTypes, gameState.GameType);
             if (currentGameIndex < 0)
             {
                 currentGameIndex = 0;
             }
             if (ImGui.Combo("Game Type", ref currentGameIndex, GameTypes, GameTypes.Length))
             {
-                configuration.GameType = GameTypes[currentGameIndex];
-                changed = true;
-                if (configuration.BingoActive)
-                {
-                    _ = Task.Run(SyncHostStateAsync);
-                }
+                gameState.GameType = GameTypes[currentGameIndex];
+                changedGame = true;
             }
 
             if (ImGui.Button("Web Settings"))
@@ -489,6 +516,11 @@ namespace FFXIVBingo4All
             if (ImGui.Button("Reset Room & Tickets"))
             {
                 showResetPopup = true;
+                gameTypeIndex = Array.IndexOf(GameTypes, gameState.GameType);
+                if (gameTypeIndex < 0)
+                {
+                    gameTypeIndex = 0;
+                }
                 ImGui.OpenPopup("Reset Room");
             }
 
@@ -497,9 +529,13 @@ namespace FFXIVBingo4All
                 DrawResetPopup();
             }
 
-            if (changed)
+            if (roomCodeChanged && !string.IsNullOrWhiteSpace(gameState.RoomCode))
             {
-                configuration.Save();
+                _ = Task.Run(() => FetchRoomStateAsync(true));
+            }
+            else if (changedGame && !string.IsNullOrWhiteSpace(gameState.RoomCode))
+            {
+                _ = Task.Run(SyncHostStateAsync);
             }
         }
 
@@ -508,33 +544,90 @@ namespace FFXIVBingo4All
             ImGui.Text("Player Generator");
 
             ImGui.InputText("Player Name", ref playerName, 64);
+            ImGui.SameLine();
+            if (ImGui.Button("Use Target"))
+            {
+                playerStatus = string.Empty;
+                var target = TargetManager.Target as IGameObject;
+                if (target == null)
+                {
+                    playerStatus = "Target a player to fill the name.";
+                }
+                else
+                {
+                    var targetName = ExtractFirstLastName(target.Name.TextValue);
+                    if (string.IsNullOrWhiteSpace(targetName))
+                    {
+                        playerStatus = "Target name is not usable.";
+                    }
+                    else
+                    {
+                        playerName = targetName;
+                    }
+                }
+            }
             ImGui.SliderInt("Card Count", ref playerCardCount, 1, 16);
             playerCardCount = Math.Clamp(playerCardCount, 1, 16);
 
+            var trimmedName = playerName.Trim();
+            bool nameValid = trimmedName.Length >= 3;
+            if (!nameValid)
+            {
+                ImGui.BeginDisabled();
+            }
             if (ImGui.Button("Generate Link"))
             {
-                if (string.IsNullOrWhiteSpace(configuration.CurrentRoomCode))
+                playerStatus = string.Empty;
+                if (string.IsNullOrWhiteSpace(configuration.RoomKey))
                 {
-                    configuration.CurrentRoomCode = Guid.NewGuid().ToString();
+                    playerStatus = "Room key is required to run a game.";
+                }
+                else
+                {
+                if (string.IsNullOrWhiteSpace(gameState.RoomCode))
+                {
+                    gameState.RoomCode = Guid.NewGuid().ToString();
                 }
 
-                var displayName = playerName.Trim();
-                var ledgerName = NormalizePlayerName(displayName);
-                var seed = Guid.NewGuid().ToString();
-                var letters = NormalizeLetters(configuration.CustomHeaderLetters);
-                generatedLink = BuildClientUrl(seed, playerCardCount, letters, displayName);
-                lastGeneratedSeed = seed;
-
-                RemoveIssuedCardsForPlayer(ledgerName);
-                configuration.IssuedCards[seed] = new PlayerData
+                var displayName = trimmedName;
+                if (displayName.Length < 3)
                 {
-                    PlayerName = ledgerName,
-                    CardCount = playerCardCount,
-                    ShortCode = string.Empty,
-                };
-                configuration.Save();
-                _ = Task.Run(SyncHostStateAsync);
-                _ = Task.Run(() => CreateShortLinkForSeedAsync(seed, playerCardCount, letters, displayName));
+                    playerStatus = "Player name must be at least 3 characters.";
+                }
+                else
+                {
+                    var ledgerName = NormalizePlayerName(displayName);
+                    var seed = Guid.NewGuid().ToString();
+                    var letters = NormalizeLetters(gameState.CustomHeaderLetters);
+                    generatedLink = BuildClientUrl(seed, playerCardCount, letters, displayName);
+                    lastGeneratedSeed = seed;
+
+                    RemoveIssuedCardsForPlayer(ledgerName);
+                    gameState.IssuedCards[seed] = new PlayerData
+                    {
+                        PlayerName = ledgerName,
+                        CardCount = playerCardCount,
+                        ShortCode = string.Empty,
+                    };
+                    _ = Task.Run(SyncHostStateAsync);
+                    _ = Task.Run(() => CreateShortLinkForSeedAsync(seed, playerCardCount, letters, displayName));
+                    playerName = string.Empty;
+                    playerStatus = "Cards added.";
+                }
+                }
+            }
+            if (!nameValid)
+            {
+                ImGui.EndDisabled();
+            }
+
+            if (!string.IsNullOrWhiteSpace(playerStatus))
+            {
+                ImGui.Text(playerStatus);
+            }
+            else if (!nameValid && !string.IsNullOrWhiteSpace(trimmedName))
+            {
+                ImGui.Text("Player name must be at least 3 characters.");
             }
 
             if (!string.IsNullOrEmpty(generatedLink))
@@ -552,49 +645,6 @@ namespace FFXIVBingo4All
             }
         }
 
-        private void DrawManualControl()
-        {
-            ImGui.Text("Manual Control");
-            ImGui.InputInt("Call Number", ref manualNumber);
-
-            bool outOfRange = manualNumber < 1 || manualNumber > 75;
-            bool isDuplicate = configuration.CalledNumbers.Contains(manualNumber);
-            if (!configuration.BingoActive || outOfRange || isDuplicate)
-            {
-                ImGui.BeginDisabled();
-            }
-
-            if (ImGui.Button("Call Number"))
-            {
-                TryHandleCallNumber(manualNumber, "manual");
-            }
-
-            if (!configuration.BingoActive || outOfRange || isDuplicate)
-            {
-                ImGui.EndDisabled();
-            }
-
-            if (isDuplicate)
-            {
-                ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), "DUPLICATE NUMBER");
-            }
-
-            if (!configuration.BingoActive)
-            {
-                ImGui.Text("Bingo is stopped.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(lastRollStatus))
-            {
-                ImGui.Text($"Last Roll: {lastRollStatus}");
-            }
-
-            if (!string.IsNullOrWhiteSpace(lastPostStatus))
-            {
-                ImGui.Text($"Last Send: {lastPostStatus}");
-            }
-        }
-
         private void DrawPlayersWindow()
         {
             if (!showPlayersWindow)
@@ -608,7 +658,7 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            if (configuration.IssuedCards.Count == 0)
+            if (gameState.IssuedCards.Count == 0)
             {
                 ImGui.Text("No players have been issued cards.");
                 ImGui.End();
@@ -616,13 +666,13 @@ namespace FFXIVBingo4All
             }
 
             var updates = new List<(string oldSeed, string playerName, int newCount)>();
-            var entries = configuration.IssuedCards.ToList();
+            var entries = gameState.IssuedCards.ToList();
 
             foreach (var entry in entries)
             {
                 var seed = entry.Key;
                 var data = entry.Value;
-                var letters = NormalizeLetters(configuration.CustomHeaderLetters);
+                var letters = NormalizeLetters(gameState.CustomHeaderLetters);
                 string link = !string.IsNullOrWhiteSpace(data.ShortCode)
                     ? BuildShortUrl(data.ShortCode)
                     : BuildClientUrl(seed, data.CardCount, letters, data.PlayerName);
@@ -660,20 +710,96 @@ namespace FFXIVBingo4All
                     updates.Add((seed, data.PlayerName, data.CardCount));
                 }
 
-                if (ImGui.CollapsingHeader($"Cards##{seed}"))
+                ImGui.SameLine();
+                if (ImGui.Button($"View Cards##{seed}"))
                 {
-                    DrawPlayerCards(seed, data.CardCount);
+                    OpenPlayerCardsWindow(seed, data.PlayerName, data.CardCount);
                 }
             }
 
             if (updates.Count > 0)
             {
                 ApplyPlayerUpdates(updates);
-                configuration.Save();
                 _ = Task.Run(SyncHostStateAsync);
             }
 
             ImGui.End();
+        }
+
+        private void OpenPlayerCardsWindow(string seed, string playerName, int cardCount)
+        {
+            if (string.IsNullOrWhiteSpace(seed))
+            {
+                return;
+            }
+
+            openPlayerCardWindows.Add(seed);
+        }
+
+        private void DrawPlayerCardWindows()
+        {
+            if (openPlayerCardWindows.Count == 0)
+            {
+                return;
+            }
+
+            var toClose = new List<string>();
+            foreach (var seed in openPlayerCardWindows)
+            {
+                if (!gameState.IssuedCards.TryGetValue(seed, out var data))
+                {
+                    toClose.Add(seed);
+                    continue;
+                }
+
+                ImGui.SetNextWindowSize(new Vector2(600, 500), ImGuiCond.FirstUseEver);
+                bool open = true;
+                string title = $"{data.PlayerName} ({data.CardCount} Cards)##cards_{seed}";
+                if (!ImGui.Begin(title, ref open))
+                {
+                    ImGui.End();
+                    if (!open)
+                    {
+                        toClose.Add(seed);
+                    }
+                    continue;
+                }
+
+                float availableWidth = ImGui.GetContentRegionAvail().X;
+                float cardWidth = 230f;
+                int columns = Math.Max(1, (int)(availableWidth / cardWidth));
+                int columnIndex = 0;
+
+                for (int cardIndex = 0; cardIndex < data.CardCount; cardIndex++)
+                {
+                    if (columnIndex > 0)
+                    {
+                        ImGui.SameLine();
+                    }
+
+                    ImGui.BeginGroup();
+                    ImGui.Text($"Card {cardIndex + 1}");
+                    DrawSinglePlayerCard(seed, cardIndex);
+                    ImGui.EndGroup();
+
+                    columnIndex++;
+                    if (columnIndex >= columns)
+                    {
+                        columnIndex = 0;
+                    }
+                }
+
+                ImGui.End();
+                if (!open)
+                {
+                    toClose.Add(seed);
+                }
+            }
+
+            foreach (var seed in toClose)
+            {
+                openPlayerCardWindows.Remove(seed);
+            }
         }
 
         private void OpenWebSettingsWindow()
@@ -682,6 +808,7 @@ namespace FFXIVBingo4All
             webServerUrlInput = configuration.ServerBaseUrl;
             webClientUrlInput = configuration.ClientBaseUrl;
             adminKeyInput = configuration.AdminKey;
+            roomKeyInput = configuration.RoomKey;
         }
 
         private void OpenServerRoomsWindow()
@@ -706,15 +833,18 @@ namespace FFXIVBingo4All
             ImGui.InputText("Server Base URL", ref webServerUrlInput, 512);
             ImGui.InputText("Client Base URL", ref webClientUrlInput, 512);
             ImGui.InputText("Admin Key", ref adminKeyInput, 128, ImGuiInputTextFlags.Password);
+            ImGui.InputText("Room Key", ref roomKeyInput, 128, ImGuiInputTextFlags.Password);
 
             if (ImGui.Button("Save"))
             {
                 configuration.ServerBaseUrl = NormalizeBaseUrl(webServerUrlInput, DefaultServerBaseUrl);
                 configuration.ClientBaseUrl = NormalizeBaseUrl(webClientUrlInput, DefaultClientBaseUrl);
                 configuration.AdminKey = adminKeyInput.Trim();
+                configuration.RoomKey = roomKeyInput.Trim();
                 webServerUrlInput = configuration.ServerBaseUrl;
                 webClientUrlInput = configuration.ClientBaseUrl;
                 adminKeyInput = configuration.AdminKey;
+                roomKeyInput = configuration.RoomKey;
                 configuration.Save();
             }
 
@@ -724,9 +854,11 @@ namespace FFXIVBingo4All
                 configuration.ServerBaseUrl = DefaultServerBaseUrl;
                 configuration.ClientBaseUrl = DefaultClientBaseUrl;
                 configuration.AdminKey = string.Empty;
+                configuration.RoomKey = string.Empty;
                 webServerUrlInput = configuration.ServerBaseUrl;
                 webClientUrlInput = configuration.ClientBaseUrl;
                 adminKeyInput = configuration.AdminKey;
+                roomKeyInput = configuration.RoomKey;
                 configuration.Save();
             }
 
@@ -747,12 +879,12 @@ namespace FFXIVBingo4All
 
                 if (ImGui.Button("Reset Now"))
                 {
-                    configuration.GameType = GameTypes[gameTypeIndex];
-                    configuration.CurrentRoomCode = Guid.NewGuid().ToString();
-                    configuration.CalledNumbers.Clear();
-                    configuration.IssuedCards.Clear();
+                    gameState.GameType = GameTypes[gameTypeIndex];
+                    gameState.RoomCode = Guid.NewGuid().ToString();
+                    gameState.CalledNumbers.Clear();
+                    gameState.IssuedCards.Clear();
                     generatedLink = string.Empty;
-                    configuration.Save();
+                    lastGeneratedSeed = string.Empty;
                     _ = Task.Run(SyncHostStateAsync);
 
                     showResetPopup = false;
@@ -789,45 +921,45 @@ namespace FFXIVBingo4All
 
             bool changed = false;
 
-            var bg = configuration.BgColor;
+            var bg = gameState.BgColor;
             if (ImGui.ColorEdit4("BG Color", ref bg))
             {
-                configuration.BgColor = bg;
+                gameState.BgColor = bg;
                 changed = true;
             }
 
-            var card = configuration.CardColor;
+            var card = gameState.CardColor;
             if (ImGui.ColorEdit4("Card Color", ref card))
             {
-                configuration.CardColor = card;
+                gameState.CardColor = card;
                 changed = true;
             }
 
-            var header = configuration.HeaderColor;
+            var header = gameState.HeaderColor;
             if (ImGui.ColorEdit4("Header Color", ref header))
             {
-                configuration.HeaderColor = header;
+                gameState.HeaderColor = header;
                 changed = true;
             }
 
-            var text = configuration.TextColor;
+            var text = gameState.TextColor;
             if (ImGui.ColorEdit4("Text Color", ref text))
             {
-                configuration.TextColor = text;
+                gameState.TextColor = text;
                 changed = true;
             }
 
-            var daub = configuration.DaubColor;
+            var daub = gameState.DaubColor;
             if (ImGui.ColorEdit4("Daub Color", ref daub))
             {
-                configuration.DaubColor = daub;
+                gameState.DaubColor = daub;
                 changed = true;
             }
 
-            var ball = configuration.BallColor;
+            var ball = gameState.BallColor;
             if (ImGui.ColorEdit4("Ball Color", ref ball))
             {
-                configuration.BallColor = ball;
+                gameState.BallColor = ball;
                 changed = true;
             }
 
@@ -843,9 +975,9 @@ namespace FFXIVBingo4All
                 ImGui.Text(skinCopyStatus);
             }
 
-            if (changed)
+            if (changed && !string.IsNullOrWhiteSpace(gameState.RoomCode))
             {
-                configuration.Save();
+                _ = Task.Run(SyncHostStateAsync);
             }
 
             ImGui.End();
@@ -921,13 +1053,13 @@ namespace FFXIVBingo4All
                     ImGui.TableSetColumnIndex(6);
                     if (ImGui.Button($"Join##{room.RoomCode}"))
                     {
-                        SelectRoom(room.RoomCode, false);
+                        SelectRoom(room.RoomCode);
                     }
 
                     ImGui.SameLine();
                     if (ImGui.Button($"Resume##{room.RoomCode}"))
                     {
-                        SelectRoom(room.RoomCode, true);
+                        SelectRoom(room.RoomCode);
                     }
 
                     ImGui.SameLine();
@@ -946,8 +1078,8 @@ namespace FFXIVBingo4All
         private void OpenStartPopup()
         {
             showStartPopup = true;
-            resumeRoomInput = configuration.CurrentRoomCode;
-            gameTypeIndex = Array.IndexOf(GameTypes, configuration.GameType);
+            resumeRoomInput = gameState.RoomCode;
+            gameTypeIndex = Array.IndexOf(GameTypes, gameState.GameType);
             if (gameTypeIndex < 0)
             {
                 gameTypeIndex = 0;
@@ -972,6 +1104,14 @@ namespace FFXIVBingo4All
             bool open = true;
             if (ImGui.BeginPopupModal("Start Bingo", ref open, ImGuiWindowFlags.AlwaysAutoResize))
             {
+                bool roomKeyMissing = string.IsNullOrWhiteSpace(configuration.RoomKey);
+                if (roomKeyMissing)
+                {
+                    ImGui.TextColored(
+                        new Vector4(1f, 0.35f, 0.35f, 1f),
+                        "Set a Room Key before starting or resuming.");
+                }
+
                 ImGui.Text("Game Type");
                 ImGui.Combo("##game_type", ref gameTypeIndex, GameTypes, GameTypes.Length);
 
@@ -1000,13 +1140,20 @@ namespace FFXIVBingo4All
                 }
 
                 ImGui.Separator();
+                if (roomKeyMissing)
+                {
+                    ImGui.BeginDisabled();
+                }
                 if (ImGui.Button("Start New Game"))
                 {
-                    configuration.GameType = GameTypes[gameTypeIndex];
+                    gameState.GameType = GameTypes[gameTypeIndex];
                     StartNewBingo();
-                    startRequested = false;
                     showStartPopup = false;
                     ImGui.CloseCurrentPopup();
+                }
+                if (roomKeyMissing)
+                {
+                    ImGui.EndDisabled();
                 }
 
                 ImGui.SameLine();
@@ -1016,13 +1163,20 @@ namespace FFXIVBingo4All
                     ImGui.BeginDisabled();
                 }
 
+                if (roomKeyMissing)
+                {
+                    ImGui.BeginDisabled();
+                }
                 if (ImGui.Button("Resume Selected"))
                 {
-                    configuration.GameType = GameTypes[gameTypeIndex];
-                    SelectRoom(resumeRoomInput.Trim(), true);
-                    startRequested = false;
+                    gameState.GameType = GameTypes[gameTypeIndex];
+                    SelectRoom(resumeRoomInput.Trim());
                     showStartPopup = false;
                     ImGui.CloseCurrentPopup();
+                }
+                if (roomKeyMissing)
+                {
+                    ImGui.EndDisabled();
                 }
 
                 if (!hasResumeRoom)
@@ -1033,12 +1187,6 @@ namespace FFXIVBingo4All
                 ImGui.SameLine();
                 if (ImGui.Button("Cancel"))
                 {
-                    if (startRequested)
-                    {
-                        configuration.BingoActive = false;
-                        configuration.Save();
-                        startRequested = false;
-                    }
                     showStartPopup = false;
                     ImGui.CloseCurrentPopup();
                 }
@@ -1067,11 +1215,11 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            int lastCalled = configuration.CalledNumbers.Count > 0
-                ? configuration.CalledNumbers[^1]
+            int lastCalled = gameState.CalledNumbers.Count > 0
+                ? gameState.CalledNumbers[^1]
                 : 0;
             bool hasLast = lastCalled > 0;
-            string lastLabel = FormatBallLabel(lastCalled, configuration.CustomHeaderLetters);
+            string lastLabel = FormatBallLabel(lastCalled, gameState.CustomHeaderLetters);
 
             ImGui.Text("Broadcast Command");
             ImGui.SameLine();
@@ -1100,8 +1248,8 @@ namespace FFXIVBingo4All
                 ImGui.Text(broadcastCopyStatus);
             }
 
-            var calledSet = new HashSet<int>(configuration.CalledNumbers);
-            var headerLetters = NormalizeLetters(configuration.CustomHeaderLetters);
+            var calledSet = new HashSet<int>(gameState.CalledNumbers);
+            var headerLetters = NormalizeLetters(gameState.CustomHeaderLetters);
             if (ImGui.BeginTable(
                 "called_grid",
                 5,
@@ -1123,9 +1271,9 @@ namespace FFXIVBingo4All
                         ImGui.TableSetColumnIndex(col);
                         if (called)
                         {
-                            ImGui.PushStyleColor(ImGuiCol.Button, configuration.DaubColor);
-                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, configuration.DaubColor);
-                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, configuration.DaubColor);
+                            ImGui.PushStyleColor(ImGuiCol.Button, gameState.DaubColor);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, gameState.DaubColor);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, gameState.DaubColor);
                             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0f, 0f, 0f, 1f));
                         }
 
@@ -1153,14 +1301,14 @@ namespace FFXIVBingo4All
                 {
                     var newSeed = Guid.NewGuid().ToString();
                     var playerName = NormalizePlayerName(update.playerName);
-                    configuration.IssuedCards[newSeed] = new PlayerData
+                    gameState.IssuedCards[newSeed] = new PlayerData
                     {
                         PlayerName = playerName,
                         CardCount = update.newCount,
                         ShortCode = string.Empty,
                     };
                     _ = Task.Run(() =>
-                        CreateShortLinkForSeedAsync(newSeed, update.newCount, NormalizeLetters(configuration.CustomHeaderLetters), playerName));
+                        CreateShortLinkForSeedAsync(newSeed, update.newCount, NormalizeLetters(gameState.CustomHeaderLetters), playerName));
                 }
             }
         }
@@ -1168,7 +1316,7 @@ namespace FFXIVBingo4All
         private void RemoveIssuedCardsForPlayer(string name)
         {
             var trimmed = NormalizePlayerName(name);
-            var toRemove = configuration.IssuedCards
+            var toRemove = gameState.IssuedCards
                 .Where(entry =>
                     string.Equals(
                         NormalizePlayerName(entry.Value.PlayerName),
@@ -1179,7 +1327,7 @@ namespace FFXIVBingo4All
 
             foreach (var seed in toRemove)
             {
-                configuration.IssuedCards.Remove(seed);
+                gameState.IssuedCards.Remove(seed);
             }
         }
 
@@ -1187,6 +1335,30 @@ namespace FFXIVBingo4All
         {
             var trimmed = (name ?? string.Empty).Trim();
             return string.IsNullOrEmpty(trimmed) ? "Guest" : trimmed;
+        }
+
+        private static string ExtractFirstLastName(string? name)
+        {
+            var trimmed = (name ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return string.Empty;
+            }
+
+            var atIndex = trimmed.IndexOf('@');
+            if (atIndex >= 0)
+            {
+                trimmed = trimmed[..atIndex].Trim();
+            }
+
+            var parts = trimmed
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .ToArray();
+            if (parts.Length >= 2)
+            {
+                return $"{parts[0]} {parts[1]}";
+            }
+            return parts.Length == 1 ? parts[0] : string.Empty;
         }
 
         private static string NormalizeLetters(string value)
@@ -1214,13 +1386,13 @@ namespace FFXIVBingo4All
 
         private string BuildClientUrl(string seed, int count, string letters, string? player)
         {
-            var bg = ColorToHex(configuration.BgColor);
-            var card = ColorToHex(configuration.CardColor);
-            var header = ColorToHex(configuration.HeaderColor);
-            var text = ColorToHex(configuration.TextColor);
-            var daub = ColorToHex(configuration.DaubColor);
-            var ball = ColorToHex(configuration.BallColor);
-            var venue = configuration.VenueName?.Trim();
+            var bg = ColorToHex(gameState.BgColor);
+            var card = ColorToHex(gameState.CardColor);
+            var header = ColorToHex(gameState.HeaderColor);
+            var text = ColorToHex(gameState.TextColor);
+            var daub = ColorToHex(gameState.DaubColor);
+            var ball = ColorToHex(gameState.BallColor);
+            var venue = gameState.VenueName?.Trim();
 
             var url = AppendQueryParam(GetClientBaseUrl(), "seed", seed);
             url = AppendQueryParam(url, "count", count.ToString());
@@ -1240,9 +1412,9 @@ namespace FFXIVBingo4All
             {
                 url = AppendQueryParam(url, "player", player.Trim());
             }
-            if (!string.IsNullOrWhiteSpace(configuration.CurrentRoomCode))
+            if (!string.IsNullOrWhiteSpace(gameState.RoomCode))
             {
-                url = AppendQueryParam(url, "room", configuration.CurrentRoomCode);
+                url = AppendQueryParam(url, "room", gameState.RoomCode);
             }
             return url;
         }
@@ -1259,19 +1431,19 @@ namespace FFXIVBingo4All
                 ["count"] = Math.Clamp(count, 1, 16),
                 ["letters"] = letters,
                 ["player"] = string.IsNullOrWhiteSpace(player) ? null : player.Trim(),
-                ["title"] = string.IsNullOrWhiteSpace(configuration.VenueName)
+                ["title"] = string.IsNullOrWhiteSpace(gameState.VenueName)
                     ? null
-                    : configuration.VenueName.Trim(),
-                ["room"] = string.IsNullOrWhiteSpace(configuration.CurrentRoomCode)
+                    : gameState.VenueName.Trim(),
+                ["room"] = string.IsNullOrWhiteSpace(gameState.RoomCode)
                     ? null
-                    : configuration.CurrentRoomCode.Trim(),
-                ["game"] = configuration.GameType,
-                ["bg"] = ColorToHex(configuration.BgColor),
-                ["card"] = ColorToHex(configuration.CardColor),
-                ["header"] = ColorToHex(configuration.HeaderColor),
-                ["text"] = ColorToHex(configuration.TextColor),
-                ["daub"] = ColorToHex(configuration.DaubColor),
-                ["ball"] = ColorToHex(configuration.BallColor),
+                    : gameState.RoomCode.Trim(),
+                ["game"] = gameState.GameType,
+                ["bg"] = ColorToHex(gameState.BgColor),
+                ["card"] = ColorToHex(gameState.CardColor),
+                ["header"] = ColorToHex(gameState.HeaderColor),
+                ["text"] = ColorToHex(gameState.TextColor),
+                ["daub"] = ColorToHex(gameState.DaubColor),
+                ["ball"] = ColorToHex(gameState.BallColor),
                 ["server"] = GetServerBaseUrl(),
             };
 
@@ -1341,10 +1513,9 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            if (configuration.IssuedCards.TryGetValue(seed, out var data))
+            if (gameState.IssuedCards.TryGetValue(seed, out var data))
             {
                 data.ShortCode = code;
-                configuration.Save();
             }
 
             if (seed == lastGeneratedSeed)
@@ -1359,6 +1530,41 @@ namespace FFXIVBingo4All
             int g = (int)MathF.Round(Math.Clamp(color.Y, 0f, 1f) * 255f);
             int b = (int)MathF.Round(Math.Clamp(color.Z, 0f, 1f) * 255f);
             return $"{r:X2}{g:X2}{b:X2}";
+        }
+
+        private static Vector4 ParseHexColor(JsonElement parent, string propertyName, Vector4 fallback)
+        {
+            if (!parent.TryGetProperty(propertyName, out var value) ||
+                value.ValueKind != JsonValueKind.String)
+            {
+                return fallback;
+            }
+
+            return ParseHexColor(value.GetString(), fallback);
+        }
+
+        private static Vector4 ParseHexColor(string? value, Vector4 fallback)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return fallback;
+            }
+
+            var cleaned = value.Trim().TrimStart('#');
+            if (cleaned.Length == 3)
+            {
+                cleaned = string.Concat(cleaned[0], cleaned[0], cleaned[1], cleaned[1], cleaned[2], cleaned[2]);
+            }
+            if (cleaned.Length != 6 ||
+                !int.TryParse(cleaned, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var rgb))
+            {
+                return fallback;
+            }
+
+            float r = ((rgb >> 16) & 0xFF) / 255f;
+            float g = ((rgb >> 8) & 0xFF) / 255f;
+            float b = (rgb & 0xFF) / 255f;
+            return new Vector4(r, g, b, 1f);
         }
 
         private string GetServerBaseUrl()
@@ -1388,6 +1594,11 @@ namespace FFXIVBingo4All
             return $"{url}{separator}{key}={Uri.EscapeDataString(value)}";
         }
 
+        private static string FormatNumber(int value)
+        {
+            return value.ToString("N0", CultureInfo.InvariantCulture);
+        }
+
         private static string FormatBallLabel(int number, string letters)
         {
             if (number < 1 || number > 75)
@@ -1403,12 +1614,12 @@ namespace FFXIVBingo4All
 
         private string BuildSkinQueryString()
         {
-            var bg = ColorToHex(configuration.BgColor);
-            var card = ColorToHex(configuration.CardColor);
-            var header = ColorToHex(configuration.HeaderColor);
-            var text = ColorToHex(configuration.TextColor);
-            var daub = ColorToHex(configuration.DaubColor);
-            var ball = ColorToHex(configuration.BallColor);
+            var bg = ColorToHex(gameState.BgColor);
+            var card = ColorToHex(gameState.CardColor);
+            var header = ColorToHex(gameState.HeaderColor);
+            var text = ColorToHex(gameState.TextColor);
+            var daub = ColorToHex(gameState.DaubColor);
+            var ball = ColorToHex(gameState.BallColor);
 
             return $"bg={bg}&card={card}&header={header}&text={text}&daub={daub}&ball={ball}";
         }
@@ -1444,7 +1655,6 @@ namespace FFXIVBingo4All
         {
             int roll = RandomNumberGenerator.GetInt32(1, 76);
             DebugChat($"Local roll: {roll}.");
-            manualNumber = roll;
             TryHandleCallNumber(roll, "local");
         }
 
@@ -1490,18 +1700,18 @@ namespace FFXIVBingo4All
             adminRoomsStatus = "Loading rooms...";
             try
             {
-                var adminKey = configuration.AdminKey?.Trim();
-                if (string.IsNullOrWhiteSpace(adminKey))
+                var roomKey = configuration.RoomKey?.Trim();
+                if (string.IsNullOrWhiteSpace(roomKey))
                 {
-                    adminRoomsStatus = "Admin key is required.";
+                    adminRoomsStatus = "Room key is required.";
                     return;
                 }
 
                 var serverBaseUrl = GetServerBaseUrl();
                 using var request = new HttpRequestMessage(
                     HttpMethod.Get,
-                    $"{serverBaseUrl}/api/admin/rooms");
-                request.Headers.Add("x-admin-key", adminKey);
+                    $"{serverBaseUrl}/api/rooms");
+                request.Headers.Add("x-room-key", roomKey);
                 var response = await httpClient.SendAsync(request).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
@@ -1558,10 +1768,10 @@ namespace FFXIVBingo4All
         {
             try
             {
-                var adminKey = configuration.AdminKey?.Trim();
-                if (string.IsNullOrWhiteSpace(adminKey))
+                var roomKey = configuration.RoomKey?.Trim();
+                if (string.IsNullOrWhiteSpace(roomKey))
                 {
-                    adminRoomsStatus = "Admin key is required.";
+                    adminRoomsStatus = "Room key is required.";
                     return;
                 }
 
@@ -1569,8 +1779,8 @@ namespace FFXIVBingo4All
                 var payload = JsonSerializer.Serialize(new { roomCode });
                 using var request = new HttpRequestMessage(
                     HttpMethod.Post,
-                    $"{serverBaseUrl}/api/admin/rooms/close");
-                request.Headers.Add("x-admin-key", adminKey);
+                    $"{serverBaseUrl}/api/rooms/close");
+                request.Headers.Add("x-room-key", roomKey);
                 request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
                 var response = await httpClient.SendAsync(request).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
@@ -1589,10 +1799,15 @@ namespace FFXIVBingo4All
 
         private void StartNewBingo()
         {
-            configuration.BingoActive = true;
-            configuration.CurrentRoomCode = Guid.NewGuid().ToString();
-            configuration.CalledNumbers.Clear();
-            configuration.IssuedCards.Clear();
+            if (string.IsNullOrWhiteSpace(configuration.RoomKey))
+            {
+                DebugChat("Room key is required to start a new room.", true);
+                return;
+            }
+
+            gameState.RoomCode = Guid.NewGuid().ToString();
+            gameState.CalledNumbers.Clear();
+            gameState.IssuedCards.Clear();
             generatedLink = string.Empty;
             lastGeneratedSeed = string.Empty;
             lastRollStatus = string.Empty;
@@ -1603,22 +1818,35 @@ namespace FFXIVBingo4All
             {
                 roomDaubs.Clear();
             }
-            configuration.Save();
             _ = Task.Run(SyncHostStateAsync);
         }
 
         private void StopBingo()
         {
-            configuration.BingoActive = false;
-            configuration.CurrentRoomCode = string.Empty;
-            configuration.Save();
+            gameState.RoomCode = string.Empty;
+            gameState.CalledNumbers.Clear();
+            gameState.IssuedCards.Clear();
+            generatedLink = string.Empty;
+            lastGeneratedSeed = string.Empty;
+            lastRollStatus = string.Empty;
+            lastPostStatus = string.Empty;
+            lastBingoDisplay = string.Empty;
+            lastBingoTimestamp = 0;
+            lock (roomStateLock)
+            {
+                roomDaubs.Clear();
+            }
         }
 
-        private void SelectRoom(string roomCode, bool activate)
+        private void SelectRoom(string roomCode)
         {
-            configuration.CurrentRoomCode = roomCode;
-            configuration.BingoActive = activate;
-            configuration.Save();
+            if (string.IsNullOrWhiteSpace(configuration.RoomKey))
+            {
+                DebugChat("Room key is required to resume a room.", true);
+                return;
+            }
+
+            gameState.RoomCode = roomCode;
             _ = Task.Run(() => FetchRoomStateAsync(true));
         }
 
@@ -1653,6 +1881,25 @@ namespace FFXIVBingo4All
             public string UpdatedAt { get; set; } = "-";
         }
 
+        private sealed class GameState
+        {
+            public string RoomCode { get; set; } = string.Empty;
+            public List<int> CalledNumbers { get; set; } = new();
+            public Dictionary<string, PlayerData> IssuedCards { get; set; } = new();
+            public int CostPerCard { get; set; } = 0;
+            public int StartingPot { get; set; } = 0;
+            public float PrizePercentage { get; set; } = 0f;
+            public string CustomHeaderLetters { get; set; } = "BINGO";
+            public string VenueName { get; set; } = "FFXIV Bingo";
+            public string GameType { get; set; } = "Single Line";
+            public Vector4 BgColor { get; set; } = new(0.07f, 0.08f, 0.09f, 1.0f);
+            public Vector4 CardColor { get; set; } = new(0.11f, 0.13f, 0.15f, 1.0f);
+            public Vector4 HeaderColor { get; set; } = new(0.16f, 0.19f, 0.23f, 1.0f);
+            public Vector4 TextColor { get; set; } = new(0.90f, 0.93f, 0.96f, 1.0f);
+            public Vector4 DaubColor { get; set; } = new(0.20f, 0.82f, 0.48f, 1.0f);
+            public Vector4 BallColor { get; set; } = new(0.96f, 0.96f, 0.96f, 1.0f);
+        }
+
         private void MaybeRefreshRoomState()
         {
             if (roomStateFetchInFlight)
@@ -1660,7 +1907,7 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(configuration.CurrentRoomCode))
+            if (string.IsNullOrWhiteSpace(gameState.RoomCode))
             {
                 return;
             }
@@ -1690,7 +1937,7 @@ namespace FFXIVBingo4All
             try
             {
                 var serverBaseUrl = GetServerBaseUrl();
-                var roomCode = Uri.EscapeDataString(configuration.CurrentRoomCode);
+                var roomCode = Uri.EscapeDataString(gameState.RoomCode);
                 var response = await httpClient
                     .GetAsync($"{serverBaseUrl}/api/room-state?roomCode={roomCode}")
                     .ConfigureAwait(false);
@@ -1752,20 +1999,144 @@ namespace FFXIVBingo4All
                     }
                 }
 
-                if (updateCalledNumbers &&
-                    root.TryGetProperty("calledNumbers", out var calledEl) &&
-                    calledEl.ValueKind == JsonValueKind.Array)
+                if (updateCalledNumbers)
                 {
-                    var called = new List<int>();
-                    foreach (var numEl in calledEl.EnumerateArray())
+                    if (root.TryGetProperty("calledNumbers", out var calledEl) &&
+                        calledEl.ValueKind == JsonValueKind.Array)
                     {
-                        if (numEl.TryGetInt32(out var num))
+                        var called = new List<int>();
+                        foreach (var numEl in calledEl.EnumerateArray())
                         {
-                            called.Add(num);
+                            if (numEl.TryGetInt32(out var num))
+                            {
+                                called.Add(num);
+                            }
+                        }
+                        gameState.CalledNumbers = called;
+                    }
+
+                    var allowedCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    if (root.TryGetProperty("allowedCards", out var allowedEl) &&
+                        allowedEl.ValueKind == JsonValueKind.Object)
+                    {
+                        foreach (var seedProp in allowedEl.EnumerateObject())
+                        {
+                            if (seedProp.Value.TryGetInt32(out var count))
+                            {
+                                allowedCounts[seedProp.Name] = Math.Clamp(count, 1, 16);
+                            }
                         }
                     }
-                    configuration.CalledNumbers = called;
-                    configuration.Save();
+
+                    var newPlayers = new Dictionary<string, PlayerData>(StringComparer.OrdinalIgnoreCase);
+                    if (root.TryGetProperty("players", out var playersEl) &&
+                        playersEl.ValueKind == JsonValueKind.Object)
+                    {
+                        foreach (var seedProp in playersEl.EnumerateObject())
+                        {
+                            if (seedProp.Value.ValueKind != JsonValueKind.Object)
+                            {
+                                continue;
+                            }
+
+                            var seed = seedProp.Name;
+                            var playerObj = seedProp.Value;
+                            string name = playerObj.TryGetProperty("name", out var nameEl)
+                                ? nameEl.GetString() ?? "Guest"
+                                : "Guest";
+                            int count = playerObj.TryGetProperty("count", out var countEl) &&
+                                        countEl.TryGetInt32(out var parsed)
+                                ? Math.Clamp(parsed, 1, 16)
+                                : 1;
+                            string shortCode = playerObj.TryGetProperty("shortCode", out var shortEl)
+                                ? shortEl.GetString() ?? string.Empty
+                                : string.Empty;
+
+                            newPlayers[seed] = new PlayerData
+                            {
+                                PlayerName = NormalizePlayerName(name),
+                                CardCount = count,
+                                ShortCode = shortCode,
+                            };
+                        }
+                    }
+
+                    foreach (var entry in allowedCounts)
+                    {
+                        if (newPlayers.TryGetValue(entry.Key, out var data))
+                        {
+                            data.CardCount = entry.Value;
+                        }
+                        else
+                        {
+                            newPlayers[entry.Key] = new PlayerData
+                            {
+                                PlayerName = "Guest",
+                                CardCount = entry.Value,
+                                ShortCode = string.Empty,
+                            };
+                        }
+                    }
+
+                    if (newPlayers.Count > 0)
+                    {
+                        gameState.IssuedCards = newPlayers;
+                    }
+                    else if (allowedCounts.Count == 0)
+                    {
+                        gameState.IssuedCards.Clear();
+                    }
+
+                    if (root.TryGetProperty("costPerCard", out var costEl) &&
+                        costEl.TryGetInt32(out var cost))
+                    {
+                        gameState.CostPerCard = Math.Max(0, cost);
+                    }
+
+                    if (root.TryGetProperty("startingPot", out var startEl) &&
+                        startEl.TryGetInt32(out var startingPot))
+                    {
+                        gameState.StartingPot = Math.Max(0, startingPot);
+                    }
+
+                    if (root.TryGetProperty("prizePercentage", out var prizeEl) &&
+                        prizeEl.TryGetDouble(out var prizePercent))
+                    {
+                        gameState.PrizePercentage = Math.Clamp((float)prizePercent, 0f, 100f);
+                    }
+
+                    if (root.TryGetProperty("gameType", out var gameEl) &&
+                        gameEl.ValueKind == JsonValueKind.String)
+                    {
+                        var nextGame = gameEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(nextGame))
+                        {
+                            gameState.GameType = nextGame.Trim();
+                        }
+                    }
+
+                    if (root.TryGetProperty("letters", out var lettersEl) &&
+                        lettersEl.ValueKind == JsonValueKind.String)
+                    {
+                        gameState.CustomHeaderLetters = NormalizeLetters(lettersEl.GetString() ?? string.Empty);
+                    }
+
+                    if (root.TryGetProperty("title", out var titleEl) &&
+                        titleEl.ValueKind == JsonValueKind.String)
+                    {
+                        gameState.VenueName = titleEl.GetString() ?? gameState.VenueName;
+                    }
+
+                    if (root.TryGetProperty("colors", out var colorsEl) &&
+                        colorsEl.ValueKind == JsonValueKind.Object)
+                    {
+                        gameState.BgColor = ParseHexColor(colorsEl, "bg", gameState.BgColor);
+                        gameState.CardColor = ParseHexColor(colorsEl, "card", gameState.CardColor);
+                        gameState.HeaderColor = ParseHexColor(colorsEl, "header", gameState.HeaderColor);
+                        gameState.TextColor = ParseHexColor(colorsEl, "text", gameState.TextColor);
+                        gameState.DaubColor = ParseHexColor(colorsEl, "daub", gameState.DaubColor);
+                        gameState.BallColor = ParseHexColor(colorsEl, "ball", gameState.BallColor);
+                    }
                 }
 
                 if (root.TryGetProperty("lastBingo", out var bingoEl) &&
@@ -1798,56 +2169,52 @@ namespace FFXIVBingo4All
             }
         }
 
-        private void DrawPlayerCards(string seed, int cardCount)
+        private void DrawSinglePlayerCard(string seed, int cardIndex)
         {
-            for (int cardIndex = 0; cardIndex < cardCount; cardIndex++)
+            var grid = GenerateCardGrid(seed, cardIndex);
+            HashSet<int> daubed = new();
+            lock (roomStateLock)
             {
-                ImGui.Text($"Card {cardIndex + 1}");
-                var grid = GenerateCardGrid(seed, cardIndex);
-                HashSet<int> daubed = new();
-                lock (roomStateLock)
+                if (roomDaubs.TryGetValue(seed, out var cardMap) &&
+                    cardMap.TryGetValue(cardIndex, out var stored))
                 {
-                    if (roomDaubs.TryGetValue(seed, out var cardMap) &&
-                        cardMap.TryGetValue(cardIndex, out var stored))
-                    {
-                        daubed = new HashSet<int>(stored);
-                    }
+                    daubed = new HashSet<int>(stored);
                 }
+            }
 
-                if (ImGui.BeginTable(
-                    $"card##{seed}_{cardIndex}",
-                    5,
-                    ImGuiTableFlags.Borders | ImGuiTableFlags.SizingFixedFit))
+            if (ImGui.BeginTable(
+                $"card##{seed}_{cardIndex}",
+                5,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.SizingFixedFit))
+            {
+                for (int row = 0; row < 5; row++)
                 {
-                    for (int row = 0; row < 5; row++)
+                    ImGui.TableNextRow();
+                    for (int col = 0; col < 5; col++)
                     {
-                        ImGui.TableNextRow();
-                        for (int col = 0; col < 5; col++)
+                        ImGui.TableSetColumnIndex(col);
+                        int? number = grid[row, col];
+                        bool isFree = !number.HasValue;
+                        bool isDaubed = isFree || daubed.Contains(number.GetValueOrDefault());
+
+                        if (isDaubed)
                         {
-                            ImGui.TableSetColumnIndex(col);
-                            int? number = grid[row, col];
-                            bool isFree = !number.HasValue;
-                            bool isDaubed = isFree || daubed.Contains(number.GetValueOrDefault());
+                            ImGui.PushStyleColor(ImGuiCol.Button, gameState.DaubColor);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, gameState.DaubColor);
+                            ImGui.PushStyleColor(ImGuiCol.ButtonActive, gameState.DaubColor);
+                            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0f, 0f, 0f, 1f));
+                        }
 
-                            if (isDaubed)
-                            {
-                                ImGui.PushStyleColor(ImGuiCol.Button, configuration.DaubColor);
-                                ImGui.PushStyleColor(ImGuiCol.ButtonHovered, configuration.DaubColor);
-                                ImGui.PushStyleColor(ImGuiCol.ButtonActive, configuration.DaubColor);
-                                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0f, 0f, 0f, 1f));
-                            }
+                        string label = isFree ? "FREE" : number.GetValueOrDefault().ToString();
+                        ImGui.Button($"{label}##{seed}_{cardIndex}_{row}_{col}", new Vector2(40, 32));
 
-                            string label = isFree ? "FREE" : number.Value.ToString();
-                            ImGui.Button($"{label}##{seed}_{cardIndex}_{row}_{col}", new Vector2(40, 32));
-
-                            if (isDaubed)
-                            {
-                                ImGui.PopStyleColor(4);
-                            }
+                        if (isDaubed)
+                        {
+                            ImGui.PopStyleColor(4);
                         }
                     }
-                    ImGui.EndTable();
                 }
+                ImGui.EndTable();
             }
         }
 

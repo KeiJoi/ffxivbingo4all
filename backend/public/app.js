@@ -54,6 +54,8 @@ setThemeVariable("text", "--text-color", "#e6edf3");
 setThemeVariable("daub", "--daub-color", "#33d17a");
 setThemeVariable("ball", "--ball-color", "#f3f3f3");
 
+const numberFormatter = new Intl.NumberFormat("en-US");
+
 const calledSet = new Set();
 const calledButtons = new Map();
 const bingoCallButton = document.getElementById("bingo-call");
@@ -62,6 +64,10 @@ const bingoListEl = document.getElementById("bingo-list");
 const potDisplayEl = document.getElementById("pot-display");
 const playerNameEl = document.getElementById("player-name");
 const pageTitleEl = document.querySelector("header h1");
+const cardsPerRowSelect = document.getElementById("cards-per-row");
+const cardSizeDown = document.getElementById("card-size-down");
+const cardSizeUp = document.getElementById("card-size-up");
+const cardSizeLabel = document.getElementById("card-size-label");
 const roomCode = params.get("room") || masterSeed;
 let socket = null;
 let hasBingo = false;
@@ -90,6 +96,90 @@ if (playerNameEl) {
   playerNameEl.textContent = playerName
     ? `Player: ${playerName}`
     : "Player: Guest";
+}
+
+const CARD_SCALE_MIN = 0.6;
+const CARD_SCALE_MAX = 1.6;
+const CARD_SCALE_STEP = 0.1;
+const DEFAULT_CARDS_PER_ROW = 12;
+
+let cardScale = Number(localStorage.getItem("bingo.cardScale") || "1");
+if (!Number.isFinite(cardScale)) {
+  cardScale = 1;
+}
+cardScale = Math.min(Math.max(cardScale, CARD_SCALE_MIN), CARD_SCALE_MAX);
+
+let cardsPerRow = Number(
+  localStorage.getItem("bingo.cardsPerRow") || DEFAULT_CARDS_PER_ROW
+);
+if (!Number.isFinite(cardsPerRow)) {
+  cardsPerRow = DEFAULT_CARDS_PER_ROW;
+}
+cardsPerRow = Math.min(Math.max(Math.round(cardsPerRow), 1), 16);
+
+function applyCardScale() {
+  document.documentElement.style.setProperty(
+    "--card-scale",
+    cardScale.toFixed(2)
+  );
+  if (cardSizeLabel) {
+    cardSizeLabel.textContent = `${Math.round(cardScale * 100)}%`;
+  }
+  if (cardSizeDown) {
+    cardSizeDown.disabled = cardScale <= CARD_SCALE_MIN + 0.01;
+  }
+  if (cardSizeUp) {
+    cardSizeUp.disabled = cardScale >= CARD_SCALE_MAX - 0.01;
+  }
+}
+
+function applyCardsPerRow() {
+  document.documentElement.style.setProperty(
+    "--cards-per-row",
+    String(cardsPerRow)
+  );
+  if (cardsPerRowSelect) {
+    cardsPerRowSelect.value = String(cardsPerRow);
+  }
+}
+
+applyCardScale();
+applyCardsPerRow();
+
+if (cardsPerRowSelect) {
+  cardsPerRowSelect.innerHTML = "";
+  for (let i = 1; i <= 16; i += 1) {
+    const option = document.createElement("option");
+    option.value = String(i);
+    option.textContent = String(i);
+    cardsPerRowSelect.appendChild(option);
+  }
+  cardsPerRowSelect.value = String(cardsPerRow);
+  cardsPerRowSelect.addEventListener("change", () => {
+    const next = Number(cardsPerRowSelect.value);
+    if (!Number.isFinite(next)) {
+      return;
+    }
+    cardsPerRow = Math.min(Math.max(Math.round(next), 1), 16);
+    localStorage.setItem("bingo.cardsPerRow", String(cardsPerRow));
+    applyCardsPerRow();
+  });
+}
+
+if (cardSizeDown) {
+  cardSizeDown.addEventListener("click", () => {
+    cardScale = Math.max(CARD_SCALE_MIN, cardScale - CARD_SCALE_STEP);
+    localStorage.setItem("bingo.cardScale", String(cardScale));
+    applyCardScale();
+  });
+}
+
+if (cardSizeUp) {
+  cardSizeUp.addEventListener("click", () => {
+    cardScale = Math.min(CARD_SCALE_MAX, cardScale + CARD_SCALE_STEP);
+    localStorage.setItem("bingo.cardScale", String(cardScale));
+    applyCardScale();
+  });
 }
 
 function setBingoBanner(message) {
@@ -159,7 +249,19 @@ function renderPrizePot(totalCards, costPerCard, startingPot, prizePercentage) {
 
   const pot = Math.max(0, startingPot) + Math.max(0, costPerCard) * totalCards;
   const prize = Math.round(pot * (Math.max(prizePercentage, 0) / 100));
-  potDisplayEl.textContent = `Prize Pool: ${prize} (Pot: ${pot})`;
+  potDisplayEl.textContent = `Prize Pool: ${numberFormatter.format(
+    prize
+  )} (Pot: ${numberFormatter.format(pot)})`;
+}
+
+function countTotalCards(allowedCards) {
+  if (!allowedCards || typeof allowedCards !== "object") {
+    return 0;
+  }
+  return Object.values(allowedCards).reduce((sum, value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? sum + parsed : sum;
+  }, 0);
 }
 
 function normalizeGameType(value) {
@@ -750,12 +852,7 @@ function connectSocket(serverUrl) {
       return;
     }
     applyDaubs(masterSeed, payload && payload.daubs);
-    const totalCards = allowedCards
-      ? Object.values(allowedCards).reduce((sum, value) => {
-          const parsed = Number(value);
-          return Number.isFinite(parsed) ? sum + parsed : sum;
-        }, 0)
-      : 0;
+    const totalCards = countTotalCards(allowedCards);
     renderPrizePot(
       totalCards,
       Number(payload && payload.costPerCard),
@@ -792,6 +889,25 @@ function connectSocket(serverUrl) {
       markCalled(String(value));
     });
     updateBingoState();
+  });
+
+  socket.on("room_state", (payload) => {
+    if (!payload) {
+      return;
+    }
+    if (payload.gameType) {
+      currentGameType = normalizeGameType(payload.gameType) || currentGameType;
+    }
+    const allowedCards =
+      payload.allowedCards && typeof payload.allowedCards === "object"
+        ? payload.allowedCards
+        : null;
+    renderPrizePot(
+      countTotalCards(allowedCards),
+      Number(payload.costPerCard),
+      Number(payload.startingPot),
+      Number(payload.prizePercentage)
+    );
   });
 
   socket.on("number_called", (payload) => {
