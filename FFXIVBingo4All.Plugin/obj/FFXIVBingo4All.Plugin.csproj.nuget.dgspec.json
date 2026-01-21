@@ -62,6 +62,10 @@
               "suppressParent": "All",
               "target": "Package",
               "version": "[1.2.39, )"
+            },
+            "ECommons": {
+              "target": "Package",
+              "version": "[3.1.0.5, )"
             }
           },
           "imports": [

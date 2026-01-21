@@ -8,3 +8,5 @@ C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\FFXIVBingo4All.Pl
 C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\FFXIVBingo4All.Plugin.csproj.CoreCompileInputs.cache
 C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\FFXIVBingo4All.Plugin.sourcelink.json
 C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\FFXIVBingo4All.dll
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\bin\Release\ECommons.dll
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Release\FFXIVBin.B18E71B2.Up2Date

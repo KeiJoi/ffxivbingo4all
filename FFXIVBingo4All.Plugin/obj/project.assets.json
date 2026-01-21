@@ -22,6 +22,19 @@
           "buildMultiTargeting/DotNet.ReproducibleBuilds.props": {},
           "buildMultiTargeting/DotNet.ReproducibleBuilds.targets": {}
         }
+      },
+      "ECommons/3.1.0.5": {
+        "type": "package",
+        "compile": {
+          "lib/net10.0-windows7.0/ECommons.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/net10.0-windows7.0/ECommons.dll": {
+            "related": ".xml"
+          }
+        }
       }
     }
   },
@@ -63,12 +76,26 @@
         "dotnet.reproduciblebuilds.1.2.39.nupkg.sha512",
         "dotnet.reproduciblebuilds.nuspec"
       ]
+    },
+    "ECommons/3.1.0.5": {
+      "sha512": "oEpz7wIB4GPEWcYsNKqf3Sny+K4agdFlSo8YKEu6QdEFuPEH6kzwL7UKCKxj327lailQ927fIPPxCFHSAOXIMA==",
+      "type": "package",
+      "path": "ecommons/3.1.0.5",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "ecommons.3.1.0.5.nupkg.sha512",
+        "ecommons.nuspec",
+        "lib/net10.0-windows7.0/ECommons.dll",
+        "lib/net10.0-windows7.0/ECommons.xml"
+      ]
     }
   },
   "projectFileDependencyGroups": {
     "net10.0-windows7.0": [
       "DalamudPackager >= 14.0.1",
-      "DotNet.ReproducibleBuilds >= 1.2.39"
+      "DotNet.ReproducibleBuilds >= 1.2.39",
+      "ECommons >= 3.1.0.5"
     ]
   },
   "packageFolders": {
@@ -133,6 +160,10 @@
             "suppressParent": "All",
             "target": "Package",
             "version": "[1.2.39, )"
+          },
+          "ECommons": {
+            "target": "Package",
+            "version": "[3.1.0.5, )"
           }
         },
         "imports": [

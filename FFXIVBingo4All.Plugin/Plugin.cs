@@ -19,6 +19,7 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Bindings.ImGui;
+using ECommons;
 
 namespace FFXIVBingo4All
 {
@@ -121,6 +122,7 @@ namespace FFXIVBingo4All
             webClientUrlInput = configuration.ClientBaseUrl;
             adminKeyInput = configuration.AdminKey;
             roomKeyInput = configuration.RoomKey;
+            ECommonsMain.Init(PluginInterface, this);
 
             ChatGui.ChatMessage += OnChatMessage;
             CommandManager.AddHandler("/ffxivbingo4all", new CommandInfo(OnCommand)
@@ -146,6 +148,7 @@ namespace FFXIVBingo4All
             PluginInterface.UiBuilder.Draw -= Draw;
             PluginInterface.UiBuilder.OpenConfigUi -= openConfigAction;
             PluginInterface.UiBuilder.OpenMainUi -= openMainAction;
+            ECommonsMain.Dispose();
             httpClient.Dispose();
         }
 
@@ -283,11 +286,11 @@ namespace FFXIVBingo4All
             try
             {
                 DebugChat("Rolling /random 75...");
-                bool handled = CommandManager.ProcessCommand("/random 75");
-                if (!handled)
+                if (!TrySendChatMessage("/random 75"))
                 {
-                    DebugChat("Command manager did not handle /random 75. Trying chat.");
-                    if (!TrySendChatMessage("/random 75"))
+                    DebugChat("Chat send failed for /random 75. Trying command manager.");
+                    bool handled = CommandManager.ProcessCommand("/random 75");
+                    if (!handled)
                     {
                         RollLocally();
                     }
@@ -1861,6 +1864,17 @@ namespace FFXIVBingo4All
 
         private bool TrySendChatMessage(string command)
         {
+            try
+            {
+                ECommons.Automation.Chat.SendMessage(command);
+                DebugChat("Sent command via ECommons chat.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                DebugChat($"ECommons chat send failed: {ex.Message}", true);
+            }
+
             try
             {
                 var method = ChatGui.GetType().GetMethod("SendMessage");
