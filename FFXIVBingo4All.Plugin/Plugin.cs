@@ -126,9 +126,9 @@ namespace FFXIVBingo4All
             {
                 HelpMessage = "Open the FFXIV Bingo host window.",
             });
-            CommandManager.AddHandler("/fb4all", new CommandInfo(OnCommand)
+            CommandManager.AddHandler("/fb4all", new CommandInfo(OnAliasCommand)
             {
-                HelpMessage = "Open the FFXIV Bingo host window.",
+                HelpMessage = "Alias for /ffxivbingo4all.",
             });
             PluginInterface.UiBuilder.Draw += Draw;
             openConfigAction = RequestOpenFromUiBuilder;
@@ -151,6 +151,11 @@ namespace FFXIVBingo4All
         private void OnCommand(string command, string args)
         {
             isOpen = true;
+        }
+
+        private void OnAliasCommand(string command, string args)
+        {
+            OnCommand(command, args);
         }
 
         private void RequestOpenFromUiBuilder()
