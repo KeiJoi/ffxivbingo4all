@@ -59,6 +59,11 @@ namespace FFXIVBingo4All
         private string lastRollStatus = string.Empty;
         private string lastPostStatus = string.Empty;
         private string lastGeneratedSeed = string.Empty;
+        private readonly HashSet<string> bingoCallers = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> paidOutCallers = new(StringComparer.OrdinalIgnoreCase);
+        private string payoutStatus = string.Empty;
+        private bool pendingBroadcastRoll = false;
+        private DateTime pendingBroadcastRollExpires = DateTime.MinValue;
         private readonly DateTime uiOpenBlockedUntil = DateTime.UtcNow.AddSeconds(5);
         private readonly ConcurrentQueue<QueuedChat> chatQueue = new();
         private readonly HashSet<string> openPlayerCardWindows = new();
@@ -172,7 +177,10 @@ namespace FFXIVBingo4All
         {
             if (!parseRollsEnabled)
             {
-                return;
+                if (!pendingBroadcastRoll)
+                {
+                    return;
+                }
             }
 
             var text = message.TextValue;
@@ -214,12 +222,24 @@ namespace FFXIVBingo4All
             if (string.IsNullOrWhiteSpace(gameState.RoomCode))
             {
                 lastRollStatus = "No active room.";
+                if (pendingBroadcastRoll)
+                {
+                    pendingBroadcastRoll = false;
+                    pendingBroadcastRollExpires = DateTime.MinValue;
+                    broadcastCopyStatus = "No active room for /yell.";
+                }
                 return false;
             }
 
             if (number < 1 || number > 75)
             {
                 lastRollStatus = $"Invalid roll ({number}).";
+                if (pendingBroadcastRoll)
+                {
+                    pendingBroadcastRoll = false;
+                    pendingBroadcastRollExpires = DateTime.MinValue;
+                    broadcastCopyStatus = "Invalid roll for /yell.";
+                }
                 return false;
             }
 
@@ -227,6 +247,12 @@ namespace FFXIVBingo4All
             {
                 ChatGui.PrintError("DUPLICATE ROLL! Reroll.");
                 lastRollStatus = "DUPLICATE NUMBER";
+                if (pendingBroadcastRoll)
+                {
+                    pendingBroadcastRoll = false;
+                    pendingBroadcastRollExpires = DateTime.MinValue;
+                    broadcastCopyStatus = "Duplicate roll; no /yell sent.";
+                }
                 return false;
             }
 
@@ -234,6 +260,21 @@ namespace FFXIVBingo4All
             lastRollStatus = $"Called {number} ({source}).";
 
             _ = Task.Run(() => PostCallNumberAsync(number));
+            if (pendingBroadcastRoll)
+            {
+                pendingBroadcastRoll = false;
+                pendingBroadcastRollExpires = DateTime.MinValue;
+                var broadcastLabel = FormatBallBroadcastLabel(number, gameState.CustomHeaderLetters);
+                var command = $"/yell {broadcastLabel}";
+                if (TrySendChatMessage(command))
+                {
+                    broadcastCopyStatus = $"Sent: {command}";
+                }
+                else
+                {
+                    broadcastCopyStatus = "Failed to send /yell.";
+                }
+            }
             return true;
         }
 
@@ -380,6 +421,12 @@ namespace FFXIVBingo4All
                 return;
             }
 
+            if (pendingBroadcastRoll && DateTime.UtcNow > pendingBroadcastRollExpires)
+            {
+                pendingBroadcastRoll = false;
+                broadcastCopyStatus = "Call number timed out.";
+            }
+
             if (!ImGui.Begin("Bingo Host", ref isOpen))
             {
                 ImGui.End();
@@ -442,6 +489,8 @@ namespace FFXIVBingo4All
             int totalPot = gameState.StartingPot + (totalCards * gameState.CostPerCard);
             int prizePool = (int)MathF.Round(totalPot * (gameState.PrizePercentage / 100f));
             int houseCut = Math.Max(0, totalPot - prizePool);
+            int bingoCount = bingoCallers.Count;
+            int prizeSplit = bingoCount > 0 ? prizePool / bingoCount : 0;
 
             const string title = "Game Status";
             float titleWidth = ImGui.CalcTextSize(title).X;
@@ -467,6 +516,8 @@ namespace FFXIVBingo4All
                 ImGui.Text($"Prize Pool: {FormatNumber(prizePool)}");
                 ImGui.Text($"House Cut: {FormatNumber(houseCut)}");
                 ImGui.Text($"Prize Percentage: {gameState.PrizePercentage:0.##}%");
+                ImGui.Text($"Bingo Called: {FormatNumber(bingoCount)}");
+                ImGui.Text($"Prize Split: {(bingoCount > 0 ? FormatNumber(prizeSplit) : "-")}");
 
                 ImGui.TableNextColumn();
                 ImGui.Dummy(new Vector2(gapWidth, 0));
@@ -529,6 +580,18 @@ namespace FFXIVBingo4All
 
             ImGui.Separator();
             DrawPlayerGenerator();
+
+            ImGui.Separator();
+            ImGui.Text("------------");
+            if (ImGui.Button("Payout"))
+            {
+                HandlePayout();
+            }
+
+            if (!string.IsNullOrWhiteSpace(payoutStatus))
+            {
+                ImGui.Text(payoutStatus);
+            }
         }
 
         private void DrawPlayerGenerator()
@@ -640,6 +703,13 @@ namespace FFXIVBingo4All
         private void DrawServerSettingsTab()
         {
             ImGui.Text("Connection Settings");
+            bool inRoom = !string.IsNullOrWhiteSpace(gameState.RoomCode);
+            if (inRoom)
+            {
+                ImGui.TextDisabled("Leave the room to edit settings.");
+                ImGui.BeginDisabled();
+            }
+
             ImGui.InputText("Server Base URL", ref webServerUrlInput, 512);
             ImGui.InputText("Client Base URL", ref webClientUrlInput, 512);
             ImGui.InputText("Admin Key", ref adminKeyInput, 128, ImGuiInputTextFlags.Password);
@@ -715,11 +785,23 @@ namespace FFXIVBingo4All
             {
                 _ = Task.Run(SyncHostStateAsync);
             }
+
+            if (inRoom)
+            {
+                ImGui.EndDisabled();
+            }
         }
 
         private void DrawUiSettingsTab()
         {
             ImGui.Text("Skin Settings");
+            bool inRoom = !string.IsNullOrWhiteSpace(gameState.RoomCode);
+            if (inRoom)
+            {
+                ImGui.TextDisabled("Leave the room to edit settings.");
+                ImGui.BeginDisabled();
+            }
+
             bool changed = false;
 
             var bg = gameState.BgColor;
@@ -780,6 +862,11 @@ namespace FFXIVBingo4All
             {
                 _ = Task.Run(SyncHostStateAsync);
             }
+
+            if (inRoom)
+            {
+                ImGui.EndDisabled();
+            }
         }
 
         private void DrawPlayersPanel()
@@ -798,13 +885,26 @@ namespace FFXIVBingo4All
             {
                 var seed = entry.Key;
                 var data = entry.Value;
+                var playerKey = NormalizePlayerName(data.PlayerName);
                 var letters = NormalizeLetters(gameState.CustomHeaderLetters);
                 string link = !string.IsNullOrWhiteSpace(data.ShortCode)
                     ? BuildShortUrl(data.ShortCode)
                     : BuildClientUrl(seed, data.CardCount, letters, data.PlayerName);
 
                 ImGui.Separator();
+                if (paidOutCallers.Contains(playerKey))
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.2f, 0.9f, 0.4f, 1f));
+                }
+                else if (bingoCallers.Contains(playerKey))
+                {
+                    ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.35f, 0.35f, 1f));
+                }
                 ImGui.Text($"{data.PlayerName} ({data.CardCount})");
+                if (paidOutCallers.Contains(playerKey) || bingoCallers.Contains(playerKey))
+                {
+                    ImGui.PopStyleColor();
+                }
                 ImGui.SameLine();
                 if (ImGui.Button($"+ Card##{seed}"))
                 {
@@ -1255,7 +1355,8 @@ namespace FFXIVBingo4All
 
             ImGui.Text("Last Called");
             ImGui.SetWindowFontScale(1.6f);
-            if (ImGui.Button(hasLast ? lastLabel : "--", new Vector2(140, 0)))
+            var callButtonSize = new Vector2(180, 0);
+            if (ImGui.Button(hasLast ? lastLabel : "--", callButtonSize))
             {
                 if (hasLast)
                 {
@@ -1266,6 +1367,21 @@ namespace FFXIVBingo4All
                 else
                 {
                     broadcastCopyStatus = "No number has been called yet.";
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Call Number", callButtonSize))
+            {
+                if (pendingBroadcastRoll)
+                {
+                    broadcastCopyStatus = "Roll already in progress.";
+                }
+                else
+                {
+                    pendingBroadcastRoll = true;
+                    pendingBroadcastRollExpires = DateTime.UtcNow.AddSeconds(10);
+                    broadcastCopyStatus = "Rolling /random 75...";
+                    RollRandomNumber();
                 }
             }
             ImGui.SetWindowFontScale(1.0f);
@@ -1362,6 +1478,72 @@ namespace FFXIVBingo4All
         {
             var trimmed = (name ?? string.Empty).Trim();
             return string.IsNullOrEmpty(trimmed) ? "Guest" : trimmed;
+        }
+
+        private bool TryGetTargetPlayerName(out string name)
+        {
+            name = string.Empty;
+            var target = TargetManager.Target as IGameObject;
+            if (target == null || target.ObjectKind != ObjectKind.Player)
+            {
+                return false;
+            }
+
+            name = ExtractFirstLastName(target.Name.TextValue);
+            return !string.IsNullOrWhiteSpace(name);
+        }
+
+        private static List<int> BuildPayoutChunks(int total)
+        {
+            var chunks = new List<int>();
+            int remaining = Math.Max(0, total);
+            while (remaining > 0)
+            {
+                int chunk = Math.Min(1_000_000, remaining);
+                chunks.Add(chunk);
+                remaining -= chunk;
+            }
+            return chunks;
+        }
+
+        private void HandlePayout()
+        {
+            payoutStatus = string.Empty;
+            if (bingoCallers.Count == 0)
+            {
+                payoutStatus = "No bingo calls yet.";
+                return;
+            }
+
+            if (!TryGetTargetPlayerName(out var targetName))
+            {
+                payoutStatus = "Target a player to pay out.";
+                return;
+            }
+
+            var normalized = NormalizePlayerName(targetName);
+            if (!bingoCallers.Contains(normalized))
+            {
+                payoutStatus = $"{targetName} has not called Bingo.";
+                return;
+            }
+
+            int totalCards = gameState.IssuedCards.Values.Sum(p => p.CardCount);
+            int totalPot = gameState.StartingPot + (totalCards * gameState.CostPerCard);
+            int prizePool = (int)MathF.Round(totalPot * (gameState.PrizePercentage / 100f));
+            int prizeSplit = prizePool / Math.Max(1, bingoCallers.Count);
+            if (prizeSplit <= 0)
+            {
+                payoutStatus = "Prize split is 0.";
+                return;
+            }
+
+            var chunks = BuildPayoutChunks(prizeSplit);
+            var chunkText = string.Join(", ", chunks.Select(FormatNumber));
+            ImGui.SetClipboardText(chunkText);
+            TrySendChatMessage($"/trade {targetName}");
+            paidOutCallers.Add(normalized);
+            payoutStatus = $"Payout for {targetName}: {chunkText} gil (copied).";
         }
 
         private static string ExtractFirstLastName(string? name)
@@ -1639,6 +1821,19 @@ namespace FFXIVBingo4All
             return $"{letter} - {number}";
         }
 
+        private static string FormatBallBroadcastLabel(int number, string letters)
+        {
+            if (number < 1 || number > 75)
+            {
+                return "--";
+            }
+
+            var normalized = NormalizeLetters(letters);
+            int index = (number - 1) / 15;
+            char letter = normalized[index];
+            return $"{letter}-{number}";
+        }
+
         private string BuildSkinQueryString()
         {
             var bg = ColorToHex(gameState.BgColor);
@@ -1841,6 +2036,9 @@ namespace FFXIVBingo4All
             lastPostStatus = string.Empty;
             lastBingoDisplay = string.Empty;
             lastBingoTimestamp = 0;
+            bingoCallers.Clear();
+            paidOutCallers.Clear();
+            payoutStatus = string.Empty;
             lock (roomStateLock)
             {
                 roomDaubs.Clear();
@@ -1859,6 +2057,9 @@ namespace FFXIVBingo4All
             lastPostStatus = string.Empty;
             lastBingoDisplay = string.Empty;
             lastBingoTimestamp = 0;
+            bingoCallers.Clear();
+            paidOutCallers.Clear();
+            payoutStatus = string.Empty;
             lock (roomStateLock)
             {
                 roomDaubs.Clear();
@@ -2189,6 +2390,37 @@ namespace FFXIVBingo4All
                         lastBingoDisplay = $"{name} @ {time:HH:mm:ss}";
                     }
                 }
+
+                var newBingoCallers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (root.TryGetProperty("bingoCalls", out var callsEl) &&
+                    callsEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var callEl in callsEl.EnumerateArray())
+                    {
+                        if (callEl.ValueKind != JsonValueKind.Object)
+                        {
+                            continue;
+                        }
+
+                        if (!callEl.TryGetProperty("name", out var nameEl))
+                        {
+                            continue;
+                        }
+
+                        var name = NormalizePlayerName(nameEl.GetString());
+                        if (!string.IsNullOrWhiteSpace(name))
+                        {
+                            newBingoCallers.Add(name);
+                        }
+                    }
+                }
+
+                bingoCallers.Clear();
+                foreach (var caller in newBingoCallers)
+                {
+                    bingoCallers.Add(caller);
+                }
+                paidOutCallers.RemoveWhere(name => !bingoCallers.Contains(name));
             }
             catch (Exception)
             {
