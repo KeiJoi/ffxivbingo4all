@@ -5,7 +5,11 @@ const { Server } = require("socket.io");
 const path = require("path");
 const sqlite3 = require("sqlite3").verbose();
 const { adminKey } = require("./admin.config");
-const { dbPath } = require("./server.config");
+const {
+  dbPath,
+  roomRetentionDays = 30,
+  cleanupIntervalMinutes = 60,
+} = require("./server.config");
 
 const app = express();
 app.use(cors({ origin: "*" }));
@@ -73,6 +77,41 @@ function dbAll(query, params) {
       resolve(rows || []);
     });
   });
+}
+
+function scheduleRoomCleanup() {
+  const retentionDays = Number(roomRetentionDays);
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+    console.log("room_cleanup_disabled");
+    return;
+  }
+
+  const intervalMinutes = Number(cleanupIntervalMinutes);
+  const intervalMs =
+    Number.isFinite(intervalMinutes) && intervalMinutes > 0
+      ? intervalMinutes * 60 * 1000
+      : 60 * 60 * 1000;
+  const retentionMs = retentionDays * 24 * 60 * 60 * 1000;
+
+  async function runCleanup() {
+    const cutoff = Date.now() - retentionMs;
+    try {
+      const result = await dbRun("DELETE FROM rooms WHERE updated_at < ?", [
+        cutoff,
+      ]);
+      if (result.changes > 0) {
+        console.log("room_cleanup", {
+          removed: result.changes,
+          cutoff,
+        });
+      }
+    } catch (err) {
+      console.error("room_cleanup_failed", err);
+    }
+  }
+
+  runCleanup();
+  setInterval(runCleanup, intervalMs);
 }
 
 function touchSession(session) {
@@ -994,3 +1033,5 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`server_listening ${PORT}`);
 });
+
+scheduleRoomCleanup();
