@@ -25,7 +25,7 @@
     "Name": "FFXIV Raffle 4 All",
     "InternalName": "FFXIVRaffle4All",
     "AssemblyVersion": "1.0.0.0",
-    "Description": "This is a plugin hosted in a totally different repo!",
+    "Description": "FFXIV Plugin for Running Raffles with a Wheel of Names Backend",
     "RepoUrl": "https://github.com/KeiJoi/ffxivraffle4all",
     "DalamudApiLevel": 14,
     "IconUrl": "https://raw.githubusercontent.com/KeiJoi/ffxivraffle4all/main/icon.png",
