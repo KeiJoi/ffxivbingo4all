@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj": {}
+    "c:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj": {}
   },
   "projects": {
-    "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj": {
+    "c:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj",
+        "projectUniqueName": "c:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj",
         "projectName": "FFXIVBingo4All",
-        "projectPath": "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj",
+        "projectPath": "c:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj",
         "packagesPath": "C:\\Users\\kyro_\\.nuget\\packages\\",
-        "outputPath": "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\obj\\",
+        "outputPath": "c:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

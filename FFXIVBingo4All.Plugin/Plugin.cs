@@ -23,6 +23,7 @@ using ECommons;
 using ECommons.Automation;
 using ECommons.UIHelpers.AddonMasterImplementations;
 using FFXIVClientStructs.FFXIV.Component.GUI;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using ECommonsCallback = ECommons.Automation.Callback;
 
 namespace FFXIVBingo4All
@@ -99,6 +100,7 @@ namespace FFXIVBingo4All
         private readonly Queue<int> pendingPayoutChunks = new();
         private int pendingPayoutChunk = 0;
         private int pendingPayoutTargetTotal = 0;
+        private int pendingPayoutStartingGil = 0;
         private DateTime pendingPayoutNextActionAt = DateTime.MinValue;
         private DateTime pendingPayoutStartTime = DateTime.MinValue;
         private DateTime pendingPayoutLastYesNoAt = DateTime.MinValue;
@@ -1683,6 +1685,16 @@ namespace FFXIVBingo4All
             return !string.IsNullOrWhiteSpace(name);
         }
 
+        private static unsafe int GetCurrentGil()
+        {
+            var inventoryManager = InventoryManager.Instance();
+            if (inventoryManager == null)
+                return 0;
+
+            // Item ID 1 is Gil in FFXIV
+            return inventoryManager->GetInventoryItemCount(1u);
+        }
+
         private static List<int> BuildPayoutChunks(int total)
         {
             var chunks = new List<int>();
@@ -1753,6 +1765,7 @@ namespace FFXIVBingo4All
             pendingPayoutTargetName = targetName;
             pendingPayoutChunk = 0;
             pendingPayoutTargetTotal = prizeSplit;
+            pendingPayoutStartingGil = GetCurrentGil();
             pendingPayoutYesClicked = false;
             pendingPayoutStage = PayoutStage.StartTrade;
             pendingPayoutStartTime = DateTime.UtcNow;
@@ -2201,20 +2214,33 @@ namespace FFXIVBingo4All
                         return;
                     }
 
+                    // Verify actual Gil change instead of relying on Yes button click
+                    int currentGil = GetCurrentGil();
+                    int actualPaidTotal = pendingPayoutStartingGil - currentGil;
+                    int owed = pendingPayoutTargetTotal;
+
+                    // Update tracking with actual amount paid
+                    payoutPaid[pendingPayoutName] = actualPaidTotal;
+
+                    // Check if we've paid enough based on actual Gil change
+                    if (actualPaidTotal >= owed)
+                    {
+                        paidOutCallers.Add(pendingPayoutName);
+                        payoutStatus = $"Payout complete for {pendingPayoutName}. Paid: {FormatNumber(actualPaidTotal)} gil.";
+                        ClearPendingPayout();
+                        return;
+                    }
+
+                    // Verify the trade actually happened
                     bool chunkSucceeded = pendingPayoutYesClicked;
                     if (chunkSucceeded)
                     {
+                        // Remove the chunk we just attempted
                         if (pendingPayoutChunks.Count > 0)
                         {
                             pendingPayoutChunks.Dequeue();
                         }
-
-                        if (!payoutPaid.TryGetValue(pendingPayoutName, out var paid))
-                        {
-                            paid = 0;
-                        }
-
-                        payoutPaid[pendingPayoutName] = paid + pendingPayoutChunk;
+                        payoutStatus = $"Progress: {FormatNumber(actualPaidTotal)} / {FormatNumber(owed)} gil paid.";
                     }
                     else
                     {
@@ -2224,22 +2250,19 @@ namespace FFXIVBingo4All
                     pendingPayoutChunk = 0;
                     pendingPayoutYesClicked = false;
 
-                    int owed = pendingPayoutTargetTotal;
-                    int paidTotal = payoutPaid.TryGetValue(pendingPayoutName, out var totalPaid)
-                        ? totalPaid
-                        : 0;
-                    if (paidTotal >= owed)
-                    {
-                        paidOutCallers.Add(pendingPayoutName);
-                        payoutStatus = $"Payout complete for {pendingPayoutName}.";
-                        ClearPendingPayout();
-                        return;
-                    }
-
-                    if (pendingPayoutChunks.Count > 0)
+                    // Continue paying if we haven't reached the owed amount yet
+                    if (actualPaidTotal < owed && pendingPayoutChunks.Count > 0)
                     {
                         pendingPayoutStage = PayoutStage.StartTrade;
                         pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(500);
+                        return;
+                    }
+
+                    // If we're out of chunks but haven't paid enough, something went wrong
+                    if (actualPaidTotal < owed)
+                    {
+                        payoutStatus = $"Payout incomplete: {FormatNumber(actualPaidTotal)} / {FormatNumber(owed)} gil paid. Out of chunks.";
+                        ClearPendingPayout();
                         return;
                     }
 
@@ -2261,6 +2284,7 @@ namespace FFXIVBingo4All
             pendingPayoutTargetName = string.Empty;
             pendingPayoutChunk = 0;
             pendingPayoutTargetTotal = 0;
+            pendingPayoutStartingGil = 0;
             pendingPayoutChunks.Clear();
             pendingPayoutNextActionAt = DateTime.MinValue;
             pendingPayoutStartTime = DateTime.MinValue;
