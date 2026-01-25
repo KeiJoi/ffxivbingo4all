@@ -21,7 +21,7 @@
   --card-grid-gap: calc(4px * var(--card-scale));
   --card-header-font: calc(14px * var(--card-scale));
   --card-ball-font: calc(16px * var(--card-scale));
-  --free-font: calc(12px * var(--card-scale));
+  --free-font: calc(10px * var(--card-scale));
   --called-ball-size: clamp(28px, 4vmin, 64px);
   --called-ball-font: clamp(14px, 2.2vmin, 26px);
 }
@@ -324,7 +324,16 @@ header h1 {
 
 .free {
   font-size: var(--free-font);
-  letter-spacing: 1px;
+  letter-spacing: 0.5px;
+  line-height: 1;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  word-break: keep-all;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
 }
 
 @media (max-width: 600px) {
