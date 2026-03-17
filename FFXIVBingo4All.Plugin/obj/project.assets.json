@@ -99,7 +99,7 @@
     ]
   },
   "packageFolders": {
-    "C:\\Users\\kyro_\\.nuget\\packages\\": {},
+    "c:\\FFXIVplugs\\ffxivbingo4all\\.dotnet\\.nuget\\packages\\": {},
     "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages": {}
   },
   "project": {
@@ -108,7 +108,7 @@
       "projectUniqueName": "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj",
       "projectName": "FFXIVBingo4All",
       "projectPath": "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj",
-      "packagesPath": "C:\\Users\\kyro_\\.nuget\\packages\\",
+      "packagesPath": "c:\\FFXIVplugs\\ffxivbingo4all\\.dotnet\\.nuget\\packages\\",
       "outputPath": "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
