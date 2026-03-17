@@ -60,6 +60,7 @@ namespace FFXIVBingo4All
             SetGilInput,
             ReadyTrade,
             WaitTradeClose,
+            VerifyTradeResult,
         }
 
         private sealed class TradeAddonHelper : AddonMasterBase<AtkUnitBase>
@@ -101,11 +102,15 @@ namespace FFXIVBingo4All
         private int pendingPayoutChunk = 0;
         private int pendingPayoutTargetTotal = 0;
         private int pendingPayoutStartingGil = 0;
+        private int pendingPayoutTrackedPaid = 0;
+        private int pendingPayoutRecordedPaidBefore = 0;
         private DateTime pendingPayoutNextActionAt = DateTime.MinValue;
         private DateTime pendingPayoutStartTime = DateTime.MinValue;
         private DateTime pendingPayoutLastYesNoAt = DateTime.MinValue;
         private bool pendingPayoutYesClicked = false;
         private PayoutStage pendingPayoutStage = PayoutStage.None;
+        private bool showPayoutWarningPopup = false;
+        private string payoutWarningMessage = string.Empty;
         private bool pendingBroadcastRoll = false;
         private DateTime pendingBroadcastRollExpires = DateTime.MinValue;
         private readonly DateTime uiOpenBlockedUntil = DateTime.UtcNow.AddSeconds(5);
@@ -510,6 +515,7 @@ namespace FFXIVBingo4All
             DrawServerRoomsWindow();
             DrawCalledBallsWindow();
             DrawStartPopup();
+            DrawPayoutWarningPopup();
         }
 
         private void DrawGameTab()
@@ -1510,6 +1516,33 @@ namespace FFXIVBingo4All
             }
         }
 
+        private void DrawPayoutWarningPopup()
+        {
+            if (showPayoutWarningPopup)
+            {
+                ImGui.OpenPopup("Payout Warning");
+                showPayoutWarningPopup = false;
+            }
+
+            bool open = true;
+            if (ImGui.BeginPopupModal("Payout Warning", ref open, ImGuiWindowFlags.AlwaysAutoResize))
+            {
+                ImGui.TextWrapped(payoutWarningMessage);
+                ImGui.Spacing();
+                if (ImGui.Button("OK", new Vector2(180f, 0f)))
+                {
+                    payoutWarningMessage = string.Empty;
+                    ImGui.CloseCurrentPopup();
+                }
+
+                ImGui.EndPopup();
+            }
+            else if (!open)
+            {
+                payoutWarningMessage = string.Empty;
+            }
+        }
+
         private void DrawCalledBallsWindow()
         {
             if (!showCalledBallsWindow)
@@ -1766,6 +1799,8 @@ namespace FFXIVBingo4All
             pendingPayoutChunk = 0;
             pendingPayoutTargetTotal = prizeSplit;
             pendingPayoutStartingGil = GetCurrentGil();
+            pendingPayoutTrackedPaid = 0;
+            pendingPayoutRecordedPaidBefore = paidAlready;
             pendingPayoutYesClicked = false;
             pendingPayoutStage = PayoutStage.StartTrade;
             pendingPayoutStartTime = DateTime.UtcNow;
@@ -2214,59 +2249,72 @@ namespace FFXIVBingo4All
                         return;
                     }
 
-                    // Verify actual Gil change instead of relying on Yes button click
+                    pendingPayoutStage = PayoutStage.VerifyTradeResult;
+                    pendingPayoutNextActionAt = DateTime.UtcNow.AddSeconds(2);
+                    return;
+
+                case PayoutStage.VerifyTradeResult:
                     int currentGil = GetCurrentGil();
-                    int actualPaidTotal = pendingPayoutStartingGil - currentGil;
+                    int actualSessionPaid = Math.Max(0, pendingPayoutStartingGil - currentGil);
+                    int actualPaidTotal = pendingPayoutRecordedPaidBefore + actualSessionPaid;
                     int owed = pendingPayoutTargetTotal;
 
-                    // Update tracking with actual amount paid
-                    payoutPaid[pendingPayoutName] = actualPaidTotal;
-
-                    // Check if we've paid enough based on actual Gil change
-                    if (actualPaidTotal >= owed)
+                    if (pendingPayoutYesClicked)
                     {
-                        paidOutCallers.Add(pendingPayoutName);
-                        payoutStatus = $"Payout complete for {pendingPayoutName}. Paid: {FormatNumber(actualPaidTotal)} gil.";
-                        ClearPendingPayout();
-                        return;
-                    }
-
-                    // Verify the trade actually happened
-                    bool chunkSucceeded = pendingPayoutYesClicked;
-                    if (chunkSucceeded)
-                    {
-                        // Remove the chunk we just attempted
+                        pendingPayoutTrackedPaid += pendingPayoutChunk;
                         if (pendingPayoutChunks.Count > 0)
                         {
                             pendingPayoutChunks.Dequeue();
                         }
-                        payoutStatus = $"Progress: {FormatNumber(actualPaidTotal)} / {FormatNumber(owed)} gil paid.";
                     }
-                    else
+
+                    int trackedPaidTotal = pendingPayoutRecordedPaidBefore + pendingPayoutTrackedPaid;
+                    payoutPaid[pendingPayoutName] = actualPaidTotal;
+
+                    if (trackedPaidTotal != actualPaidTotal)
                     {
-                        payoutStatus = "Trade canceled, retrying...";
+                        payoutStatus = "Payout mismatch detected. Complete payout by hand.";
+                        payoutWarningMessage =
+                            $"Payout verification failed for {pendingPayoutTargetName}.\n\n" +
+                            $"Plugin tracked: {FormatNumber(trackedPaidTotal)} gil\n" +
+                            $"Observed gil change: {FormatNumber(actualPaidTotal)} gil\n" +
+                            $"Prize split owed: {FormatNumber(owed)} gil\n\n" +
+                            "Stop automatic payout and complete the remaining payout by hand.";
+                        showPayoutWarningPopup = true;
+                        ClearPendingPayout();
+                        return;
                     }
 
                     pendingPayoutChunk = 0;
                     pendingPayoutYesClicked = false;
 
-                    // Continue paying if we haven't reached the owed amount yet
-                    if (actualPaidTotal < owed && pendingPayoutChunks.Count > 0)
+                    if (actualPaidTotal >= owed)
                     {
+                        paidOutCallers.Add(pendingPayoutName);
+                        payoutStatus =
+                            $"Payout complete for {pendingPayoutName}. Paid: {FormatNumber(actualPaidTotal)} gil.";
+                        ClearPendingPayout();
+                        return;
+                    }
+
+                    if (pendingPayoutChunks.Count > 0)
+                    {
+                        payoutStatus = pendingPayoutTrackedPaid > 0
+                            ? $"Progress: {FormatNumber(actualPaidTotal)} / {FormatNumber(owed)} gil paid."
+                            : "Trade canceled, retrying...";
                         pendingPayoutStage = PayoutStage.StartTrade;
                         pendingPayoutNextActionAt = DateTime.UtcNow.AddMilliseconds(500);
                         return;
                     }
 
-                    // If we're out of chunks but haven't paid enough, something went wrong
-                    if (actualPaidTotal < owed)
-                    {
-                        payoutStatus = $"Payout incomplete: {FormatNumber(actualPaidTotal)} / {FormatNumber(owed)} gil paid. Out of chunks.";
-                        ClearPendingPayout();
-                        return;
-                    }
-
-                    payoutStatus = $"Payout complete for {pendingPayoutName}.";
+                    payoutStatus =
+                        $"Payout incomplete: {FormatNumber(actualPaidTotal)} / {FormatNumber(owed)} gil paid. Complete the remainder by hand.";
+                    payoutWarningMessage =
+                        $"Automatic payout ended before the full amount was confirmed for {pendingPayoutTargetName}.\n\n" +
+                        $"Paid: {FormatNumber(actualPaidTotal)} gil\n" +
+                        $"Owed: {FormatNumber(owed)} gil\n\n" +
+                        "Please finish the payout by hand.";
+                    showPayoutWarningPopup = true;
                     ClearPendingPayout();
                     return;
             }
@@ -2285,6 +2333,8 @@ namespace FFXIVBingo4All
             pendingPayoutChunk = 0;
             pendingPayoutTargetTotal = 0;
             pendingPayoutStartingGil = 0;
+            pendingPayoutTrackedPaid = 0;
+            pendingPayoutRecordedPaidBefore = 0;
             pendingPayoutChunks.Clear();
             pendingPayoutNextActionAt = DateTime.MinValue;
             pendingPayoutStartTime = DateTime.MinValue;
