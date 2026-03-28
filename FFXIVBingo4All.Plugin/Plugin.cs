@@ -457,7 +457,7 @@ namespace FFXIVBingo4All
         {
             try
             {
-                var json = JsonSerializer.Serialize(payload);
+                var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
                 using var content = new StringContent(json, Encoding.UTF8, "application/json");
                 var serverBaseUrl = GetServerBaseUrl();
                 var url = $"{serverBaseUrl}{path}";
@@ -2364,12 +2364,29 @@ namespace FFXIVBingo4All
             gameState.Progressive.LockedPhaseTwoPayout = Math.Max(0, gameState.Progressive.LockedPhaseTwoPayout);
             gameState.Progressive.LockedPhaseThreePayout = Math.Max(0, gameState.Progressive.LockedPhaseThreePayout);
 
+            float initialRemaining = gameState.Progressive.PhaseTwoSplit +
+                gameState.Progressive.PhaseThreeSplit;
+            if (gameState.Progressive.CurrentPhase <= 1)
+            {
+                if (initialRemaining <= 0f)
+                {
+                    gameState.Progressive.RemainingPhaseTwoSplit = 50f;
+                    gameState.Progressive.RemainingPhaseThreeSplit = 50f;
+                }
+                else
+                {
+                    gameState.Progressive.RemainingPhaseTwoSplit =
+                        (gameState.Progressive.PhaseTwoSplit / initialRemaining) * 100f;
+                    gameState.Progressive.RemainingPhaseThreeSplit =
+                        100f - gameState.Progressive.RemainingPhaseTwoSplit;
+                }
+                return;
+            }
+
             float remainingTotal = gameState.Progressive.RemainingPhaseTwoSplit +
                 gameState.Progressive.RemainingPhaseThreeSplit;
             if (remainingTotal <= 0f)
             {
-                float initialRemaining = gameState.Progressive.PhaseTwoSplit +
-                    gameState.Progressive.PhaseThreeSplit;
                 if (initialRemaining <= 0f)
                 {
                     gameState.Progressive.RemainingPhaseTwoSplit = 50f;
@@ -3634,6 +3651,7 @@ namespace FFXIVBingo4All
         }
     }
 }
+
 
 
 

@@ -2,7 +2,7 @@
   "Author": "FFXIVBingo4All",
   "Name": "FFXIV Bingo 4 All",
   "InternalName": "FFXIVBingo4All",
-  "AssemblyVersion": "1.0.0.5",
+  "AssemblyVersion": "1.0.0.6",
   "Punchline": "Bingo host relay and client management.",
   "Description": "Host relay plugin for multi-card bingo.",
   "Tags": [
@@ -12,3 +12,4 @@
   "ApplicableVersion": "any",
   "DalamudApiLevel": 14
 }
+

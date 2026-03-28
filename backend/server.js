@@ -190,22 +190,27 @@ function normalizeProgressiveState(raw, gameType) {
   state.phaseThreeSplit = clampPercentage(state.phaseThreeSplit);
 
   const derivedRemaining = deriveRemainingProgressiveSplits(state);
-  state.remainingPhaseTwoSplit = clampPercentage(
-    state.remainingPhaseTwoSplit ?? derivedRemaining.remainingPhaseTwoSplit
-  );
-  state.remainingPhaseThreeSplit = clampPercentage(
-    state.remainingPhaseThreeSplit ?? derivedRemaining.remainingPhaseThreeSplit
-  );
-
-  const remainingTotal =
-    state.remainingPhaseTwoSplit + state.remainingPhaseThreeSplit;
-  if (remainingTotal > 0) {
-    state.remainingPhaseTwoSplit =
-      (state.remainingPhaseTwoSplit / remainingTotal) * 100;
-    state.remainingPhaseThreeSplit = 100 - state.remainingPhaseTwoSplit;
-  } else {
+  if (state.currentPhase <= 1) {
     state.remainingPhaseTwoSplit = derivedRemaining.remainingPhaseTwoSplit;
     state.remainingPhaseThreeSplit = derivedRemaining.remainingPhaseThreeSplit;
+  } else {
+    state.remainingPhaseTwoSplit = clampPercentage(
+      state.remainingPhaseTwoSplit ?? derivedRemaining.remainingPhaseTwoSplit
+    );
+    state.remainingPhaseThreeSplit = clampPercentage(
+      state.remainingPhaseThreeSplit ?? derivedRemaining.remainingPhaseThreeSplit
+    );
+
+    const remainingTotal =
+      state.remainingPhaseTwoSplit + state.remainingPhaseThreeSplit;
+    if (remainingTotal > 0) {
+      state.remainingPhaseTwoSplit =
+        (state.remainingPhaseTwoSplit / remainingTotal) * 100;
+      state.remainingPhaseThreeSplit = 100 - state.remainingPhaseTwoSplit;
+    } else {
+      state.remainingPhaseTwoSplit = derivedRemaining.remainingPhaseTwoSplit;
+      state.remainingPhaseThreeSplit = derivedRemaining.remainingPhaseThreeSplit;
+    }
   }
 
   state.lockedPhaseOnePayout = Math.max(
@@ -1146,6 +1151,7 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("bingo_called", {
       roomCode,
       name: caller,
+      seed: typeof seed === "string" ? seed : null,
       phase:
         session.progressive && session.progressive.enabled
           ? session.progressive.currentPhase
@@ -1216,3 +1222,5 @@ server.listen(PORT, () => {
 });
 
 scheduleRoomCleanup();
+
+
