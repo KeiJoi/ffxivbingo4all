@@ -87,6 +87,8 @@ const gameTypes = [
   "Progressive Phase 3 - Blackout",
 ];
 let currentGameType = normalizeGameType(gameParam) || "Single Line";
+let currentProgressiveState = null;
+let playerCalledCurrentPhase = false;
 
 const playerName =
   (playerParam || "").trim().length > 0 ? playerParam.trim().slice(0, 32) : "";
@@ -202,12 +204,89 @@ function recordBingoCall(call) {
   }
   bingoCalls.push({
     name: call.name,
+    seed: call.seed,
+    phase: call.phase,
     timestamp: call.timestamp,
   });
   renderBingoCalls();
 }
 
-function renderPrizePot(totalCards, costPerCard, startingPot, prizePercentage) {
+function normalizeProgressiveState(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return null;
+  }
+  return {
+    enabled: Boolean(raw.enabled),
+    currentPhase: Math.min(3, Math.max(1, Math.floor(Number(raw.currentPhase) || 1))),
+    phaseStartPrizePool: Math.max(0, Math.floor(Number(raw.phaseStartPrizePool) || 0)),
+    phaseOneSplit: Math.max(0, Number(raw.phaseOneSplit) || 0),
+    remainingPhaseTwoSplit: Math.max(0, Number(raw.remainingPhaseTwoSplit) || 0),
+    lockedPhaseOnePayout: Math.max(0, Math.floor(Number(raw.lockedPhaseOnePayout) || 0)),
+    lockedPhaseTwoPayout: Math.max(0, Math.floor(Number(raw.lockedPhaseTwoPayout) || 0)),
+  };
+}
+
+function getCurrentPhaseNumber() {
+  if (!currentProgressiveState || !currentProgressiveState.enabled) {
+    return 0;
+  }
+  return currentProgressiveState.currentPhase;
+}
+
+function refreshPlayerBingoLock() {
+  const currentPhase = getCurrentPhaseNumber();
+  const callerName = getCallerName().trim().toLowerCase();
+  playerCalledCurrentPhase = bingoCalls.some((call) => {
+    if (!call || typeof call !== "object") {
+      return false;
+    }
+    if (currentPhase > 0 && (Number(call.phase) || 0) !== currentPhase) {
+      return false;
+    }
+    if (typeof call.seed === "string" && call.seed === masterSeed) {
+      return true;
+    }
+    if (!callerName) {
+      return false;
+    }
+    const callName = typeof call.name === "string" ? call.name.trim().toLowerCase() : "";
+    return callName.length > 0 && callName === callerName;
+  });
+}
+
+function getActivePrizePool(totalCards, costPerCard, startingPot, prizePercentage, progressive) {
+  const pot = Math.max(0, startingPot) + Math.max(0, costPerCard) * totalCards;
+  const overallPrizePool = Math.round(pot * (Math.max(prizePercentage, 0) / 100));
+  if (!progressive || !progressive.enabled) {
+    return { pot, prize: overallPrizePool };
+  }
+
+  const phase = Math.min(3, Math.max(1, Number(progressive.currentPhase) || 1));
+  const lockedPhaseOnePayout = Math.max(0, Math.floor(Number(progressive.lockedPhaseOnePayout) || 0));
+  const lockedPhaseTwoPayout = Math.max(0, Math.floor(Number(progressive.lockedPhaseTwoPayout) || 0));
+  const lockedBeforeCurrentPhase = phase === 1
+    ? 0
+    : phase === 2
+      ? lockedPhaseOnePayout
+      : lockedPhaseOnePayout + lockedPhaseTwoPayout;
+  const phaseStartPrizePool =
+    Math.max(0, Math.floor(Number(progressive.phaseStartPrizePool) || 0)) || overallPrizePool;
+  const remainingPrizePool = Math.max(0, phaseStartPrizePool - lockedBeforeCurrentPhase);
+
+  let splitPercent = 100;
+  if (phase === 1) {
+    splitPercent = Math.max(0, Number(progressive.phaseOneSplit) || 0);
+  } else if (phase === 2) {
+    splitPercent = Math.max(0, Number(progressive.remainingPhaseTwoSplit) || 0);
+  }
+
+  return {
+    pot,
+    prize: Math.round(remainingPrizePool * (splitPercent / 100)),
+  };
+}
+
+function renderPrizePot(totalCards, costPerCard, startingPot, prizePercentage, progressive) {
   if (!potDisplayEl) {
     return;
   }
@@ -221,11 +300,16 @@ function renderPrizePot(totalCards, costPerCard, startingPot, prizePercentage) {
     return;
   }
 
-  const pot = Math.max(0, startingPot) + Math.max(0, costPerCard) * totalCards;
-  const prize = Math.round(pot * (Math.max(prizePercentage, 0) / 100));
+  const activePrize = getActivePrizePool(
+    totalCards,
+    costPerCard,
+    startingPot,
+    prizePercentage,
+    normalizeProgressiveState(progressive)
+  );
   potDisplayEl.textContent = `Prize Pool: ${numberFormatter.format(
-    prize
-  )} (Pot: ${numberFormatter.format(pot)})`;
+    activePrize.prize
+  )} (Pot: ${numberFormatter.format(activePrize.pot)})`;
 }
 
 function countTotalCards(allowedCards) {
@@ -376,7 +460,7 @@ function updateBingoButtonState() {
   if (!bingoCallButton) {
     return;
   }
-  bingoCallButton.disabled = !isConnected || !hasBingo;
+  bingoCallButton.disabled = !isConnected || !hasBingo || playerCalledCurrentPhase;
 }
 
 function getCallerName() {
@@ -830,6 +914,9 @@ function connectSocket(serverUrl) {
       : (payload && payload.allowedSeeds) || [];
     enforceSeeds =
       Boolean(payload && payload.enforceSeeds) || allowedSeeds.length > 0;
+    currentProgressiveState = normalizeProgressiveState(
+      payload && payload.progressive
+    );
     if (payload && payload.gameType) {
       currentGameType = normalizeGameType(payload.gameType) || currentGameType;
     }
@@ -846,7 +933,8 @@ function connectSocket(serverUrl) {
       totalCards,
       Number(payload && payload.costPerCard),
       Number(payload && payload.startingPot),
-      Number(payload && payload.prizePercentage)
+      Number(payload && payload.prizePercentage),
+      payload && payload.progressive
     );
     if (
       allowedCards &&
@@ -867,12 +955,15 @@ function connectSocket(serverUrl) {
         if (call && typeof call === "object") {
           bingoCalls.push({
             name: call.name,
+            seed: call.seed,
+            phase: call.phase,
             timestamp: call.timestamp,
           });
         }
       });
       renderBingoCalls();
     }
+    refreshPlayerBingoLock();
     const called = (payload && payload.calledNumbers) || [];
     called.forEach((value) => {
       markCalled(String(value));
@@ -884,6 +975,7 @@ function connectSocket(serverUrl) {
     if (!payload) {
       return;
     }
+    currentProgressiveState = normalizeProgressiveState(payload.progressive);
     if (payload.gameType) {
       currentGameType = normalizeGameType(payload.gameType) || currentGameType;
     }
@@ -895,7 +987,8 @@ function connectSocket(serverUrl) {
       countTotalCards(allowedCards),
       Number(payload.costPerCard),
       Number(payload.startingPot),
-      Number(payload.prizePercentage)
+      Number(payload.prizePercentage),
+      payload.progressive
     );
     if (Array.isArray(payload.bingoCalls)) {
       bingoCalls.length = 0;
@@ -903,12 +996,15 @@ function connectSocket(serverUrl) {
         if (call && typeof call === "object") {
           bingoCalls.push({
             name: call.name,
+            seed: call.seed,
+            phase: call.phase,
             timestamp: call.timestamp,
           });
         }
       });
       renderBingoCalls();
     }
+    refreshPlayerBingoLock();
     if (payload.lastBingo && payload.lastBingo.name) {
       setBingoBanner(`BINGO called by ${payload.lastBingo.name}!`);
     } else {
@@ -930,6 +1026,8 @@ function connectSocket(serverUrl) {
     const caller = payload && payload.name ? payload.name : "Unknown";
     setBingoBanner(`BINGO called by ${caller}!`);
     recordBingoCall(payload);
+    refreshPlayerBingoLock();
+    updateBingoButtonState();
   });
 
   socket.on("cheat_detected", (payload) => {
@@ -986,6 +1084,12 @@ if (!linkBlocked) {
     initializePage();
   }
 }
+
+
+
+
+
+
 
 
 
