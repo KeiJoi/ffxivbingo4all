@@ -75,7 +75,17 @@ let enforceSeeds = false;
 let pageInitialized = false;
 const cardMatrices = [];
 const bingoCalls = [];
-const gameTypes = ["Single Line", "Two Lines", "Four Corners", "Blackout"];
+const gameTypes = [
+  "Single Line",
+  "Two Lines",
+  "Double Line",
+  "Four Corners",
+  "Blackout",
+  "Progressive Bingo",
+  "Progressive Phase 1 - Single Line",
+  "Progressive Phase 2 - Double Line",
+  "Progressive Phase 3 - Blackout",
+];
 let currentGameType = normalizeGameType(gameParam) || "Single Line";
 
 const playerName =
@@ -232,6 +242,21 @@ function normalizeGameType(value) {
   const trimmed = (value || "").trim().toLowerCase();
   if (!trimmed) {
     return "";
+  }
+  if (trimmed === "double line") {
+    return "Double Line";
+  }
+  if (trimmed === "progressive bingo") {
+    return "Progressive Bingo";
+  }
+  if (trimmed.includes("progressive phase 1")) {
+    return "Progressive Phase 1 - Single Line";
+  }
+  if (trimmed.includes("progressive phase 2")) {
+    return "Progressive Phase 2 - Double Line";
+  }
+  if (trimmed.includes("progressive phase 3")) {
+    return "Progressive Phase 3 - Blackout";
   }
   for (const type of gameTypes) {
     if (type.toLowerCase() === trimmed) {
@@ -943,5 +968,7 @@ if (!linkBlocked) {
     initializePage();
   }
 }
+
+
 
 
