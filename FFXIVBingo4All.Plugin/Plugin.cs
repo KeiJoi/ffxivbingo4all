@@ -122,6 +122,8 @@ namespace FFXIVBingo4All
         private bool roomStateFetchInFlight = false;
         private string lastBingoDisplay = string.Empty;
         private long lastBingoTimestamp = 0;
+        private string progressiveStatus = string.Empty;
+        private bool clearBingoStateOnNextSync = false;
 
         private readonly struct QueuedChat
         {
@@ -160,6 +162,7 @@ namespace FFXIVBingo4All
             "Two Lines",
             "Four Corners",
             "Blackout",
+            "Progressive Bingo",
         };
 
         public Plugin()
@@ -371,10 +374,13 @@ namespace FFXIVBingo4All
                 return;
             }
 
+            MaybeRefreshProgressivePhaseSnapshot();
+
             var payload = new
             {
                 roomCode = gameState.RoomCode,
                 roomKey,
+                clearBingoState = clearBingoStateOnNextSync,
                 calledNumbers = gameState.CalledNumbers,
                 allowedCards = gameState.IssuedCards.ToDictionary(
                     entry => entry.Key,
@@ -391,6 +397,7 @@ namespace FFXIVBingo4All
                 startingPot = gameState.StartingPot,
                 prizePercentage = gameState.PrizePercentage,
                 gameType = gameState.GameType,
+                progressive = gameState.Progressive,
                 letters = NormalizeLetters(gameState.CustomHeaderLetters),
                 title = gameState.VenueName,
                 bg = ColorToHex(gameState.BgColor),
@@ -409,6 +416,10 @@ namespace FFXIVBingo4All
                 $"Host sync: room {gameState.RoomCode}, {gameState.CalledNumbers.Count} numbers.");
             var ok = await PostJsonAsync("/api/host-sync", payload).ConfigureAwait(false);
             lastPostStatus = ok ? "Host sync ok." : "Host sync failed.";
+            if (ok)
+            {
+                clearBingoStateOnNextSync = false;
+            }
             DebugChat(ok ? "Host sync complete." : "Host sync failed.");
         }
 
@@ -539,10 +550,12 @@ namespace FFXIVBingo4All
 
         private void DrawGameTopSection()
         {
-            int totalCards = gameState.IssuedCards.Values.Sum(p => p.CardCount);
-            int totalPot = gameState.StartingPot + (totalCards * gameState.CostPerCard);
-            int prizePool = (int)MathF.Round(totalPot * (gameState.PrizePercentage / 100f));
-            int houseCut = Math.Max(0, totalPot - prizePool);
+            MaybeRefreshProgressivePhaseSnapshot();
+            int totalCards = GetTotalCardsSold();
+            int totalPot = GetTotalPot();
+            int overallPrizePool = GetOverallPrizePool();
+            int prizePool = GetCurrentPrizePool();
+            int houseCut = Math.Max(0, totalPot - overallPrizePool);
             int bingoCount = bingoCallers.Count;
             int prizeSplit = bingoCount > 0 ? prizePool / bingoCount : 0;
 
@@ -578,7 +591,7 @@ namespace FFXIVBingo4All
 
                 ImGui.TableNextColumn();
                 ImGui.Text($"Total Cards Sold: {FormatNumber(totalCards)}");
-                ImGui.Text($"Game Type: {gameState.GameType}");
+                ImGui.Text($"Game Type: {GetCurrentGameTypeLabel()}");
                 ImGui.Text($"Roll Parse: {(parseRollsEnabled ? "On" : "Off")}");
                 ImGui.Text("Call Status");
                 if (string.Equals(lastRollStatus, "DUPLICATE NUMBER", StringComparison.OrdinalIgnoreCase))
@@ -630,6 +643,32 @@ namespace FFXIVBingo4All
             if (ImGui.Button("Server Rooms"))
             {
                 OpenServerRoomsWindow();
+            }
+
+            if (IsProgressiveMode())
+            {
+                bool canLockPhase = CanLockProgressivePhase(out var progressiveReason);
+                if (!canLockPhase)
+                {
+                    ImGui.BeginDisabled();
+                }
+                if (ImGui.Button($"Lock Phase {gameState.Progressive.CurrentPhase}"))
+                {
+                    LockCurrentProgressivePhase();
+                }
+                if (!canLockPhase)
+                {
+                    ImGui.EndDisabled();
+                }
+
+                if (!string.IsNullOrWhiteSpace(progressiveStatus))
+                {
+                    ImGui.Text(progressiveStatus);
+                }
+                else if (!canLockPhase && !string.IsNullOrWhiteSpace(progressiveReason))
+                {
+                    ImGui.TextDisabled(progressiveReason);
+                }
             }
 
             ImGui.Separator();
@@ -731,22 +770,38 @@ namespace FFXIVBingo4All
                 else
                 {
                     var ledgerName = NormalizePlayerName(displayName);
-                    var seed = Guid.NewGuid().ToString();
                     var letters = NormalizeLetters(gameState.CustomHeaderLetters);
-                    generatedLink = BuildClientUrl(seed, playerCardCount, letters, displayName);
+                    var existingEntry = gameState.IssuedCards.FirstOrDefault(entry =>
+                        string.Equals(
+                            NormalizePlayerName(entry.Value.PlayerName),
+                            ledgerName,
+                            StringComparison.OrdinalIgnoreCase));
+                    bool useExistingSeed =
+                        IsProgressiveMode() &&
+                        gameState.Progressive.CurrentPhase > 1 &&
+                        !string.IsNullOrWhiteSpace(existingEntry.Key);
+                    var seed = useExistingSeed ? existingEntry.Key : Guid.NewGuid().ToString();
+                    int totalCardCount = useExistingSeed
+                        ? Math.Clamp(existingEntry.Value.CardCount + playerCardCount, 1, 16)
+                        : playerCardCount;
                     lastGeneratedSeed = seed;
 
-                    RemoveIssuedCardsForPlayer(ledgerName);
+                    if (!useExistingSeed)
+                    {
+                        RemoveIssuedCardsForPlayer(ledgerName);
+                    }
                     gameState.IssuedCards[seed] = new PlayerData
                     {
                         PlayerName = ledgerName,
-                        CardCount = playerCardCount,
+                        CardCount = totalCardCount,
                         ShortCode = string.Empty,
                     };
+                    MaybeRefreshProgressivePhaseSnapshot();
+                    generatedLink = BuildClientUrl(seed, totalCardCount, letters, displayName);
                     _ = Task.Run(SyncHostStateAsync);
-                    _ = Task.Run(() => CreateShortLinkForSeedAsync(seed, playerCardCount, letters, displayName));
+                    _ = Task.Run(() => CreateShortLinkForSeedAsync(seed, totalCardCount, letters, displayName));
                     playerName = string.Empty;
-                    playerStatus = "Cards added.";
+                    playerStatus = useExistingSeed ? "Cards added to existing seed." : "Cards added.";
                 }
                 }
             }
@@ -781,7 +836,7 @@ namespace FFXIVBingo4All
             bool inRoom = !string.IsNullOrWhiteSpace(gameState.RoomCode);
             if (inRoom)
             {
-                ImGui.TextDisabled("Leave the room to edit settings.");
+                ImGui.TextDisabled("Leave the room to edit connection settings.");
                 ImGui.BeginDisabled();
             }
 
@@ -815,6 +870,11 @@ namespace FFXIVBingo4All
                 adminKeyInput = configuration.AdminKey;
                 roomKeyInput = configuration.RoomKey;
                 configuration.Save();
+            }
+
+            if (inRoom)
+            {
+                ImGui.EndDisabled();
             }
 
             ImGui.Separator();
@@ -856,14 +916,102 @@ namespace FFXIVBingo4All
                 changedGame = true;
             }
 
-            if (changedGame && !string.IsNullOrWhiteSpace(gameState.RoomCode))
+            EnsureProgressiveState();
+            ImGui.Separator();
+            ImGui.Text("Progressive Bingo");
+            ImGui.TextWrapped("Phase 1 is Single Line, Phase 2 is Double Line, and Phase 3 is Blackout.");
+
+            float phaseOneSplit = gameState.Progressive.PhaseOneSplit;
+            if (ImGui.InputFloat("Phase 1 Split %", ref phaseOneSplit, 0f, 0f, "%.2f"))
             {
-                _ = Task.Run(SyncHostStateAsync);
+                gameState.Progressive.PhaseOneSplit = Math.Clamp(phaseOneSplit, 0f, 100f);
+                changedGame = true;
             }
 
-            if (inRoom)
+            float phaseTwoSplit = gameState.Progressive.PhaseTwoSplit;
+            if (ImGui.InputFloat("Phase 2 Split %", ref phaseTwoSplit, 0f, 0f, "%.2f"))
             {
-                ImGui.EndDisabled();
+                gameState.Progressive.PhaseTwoSplit = Math.Clamp(phaseTwoSplit, 0f, 100f);
+                changedGame = true;
+            }
+
+            float phaseThreeSplit = gameState.Progressive.PhaseThreeSplit;
+            if (ImGui.InputFloat("Phase 3 Split %", ref phaseThreeSplit, 0f, 0f, "%.2f"))
+            {
+                gameState.Progressive.PhaseThreeSplit = Math.Clamp(phaseThreeSplit, 0f, 100f);
+                changedGame = true;
+            }
+
+            float splitTotal = gameState.Progressive.PhaseOneSplit +
+                gameState.Progressive.PhaseTwoSplit +
+                gameState.Progressive.PhaseThreeSplit;
+            if (Math.Abs(splitTotal - 100f) > 0.01f)
+            {
+                ImGui.TextColored(
+                    new Vector4(1f, 0.35f, 0.35f, 1f),
+                    $"Progressive split total must equal 100%. Current: {splitTotal:0.##}%");
+            }
+            else
+            {
+                ImGui.Text($"Initial split total: {splitTotal:0.##}%");
+            }
+
+            if (IsProgressiveMode() && gameState.Progressive.CurrentPhase >= 2)
+            {
+                if (gameState.Progressive.CurrentPhase == 2)
+                {
+                    float remainingPhaseTwo = gameState.Progressive.RemainingPhaseTwoSplit;
+                    if (ImGui.InputFloat(
+                        "Remaining Phase 2 Split %",
+                        ref remainingPhaseTwo,
+                        0f,
+                        0f,
+                        "%.2f"))
+                    {
+                        gameState.Progressive.RemainingPhaseTwoSplit =
+                            Math.Clamp(remainingPhaseTwo, 0f, 100f);
+                        changedGame = true;
+                    }
+
+                    float remainingPhaseThree = gameState.Progressive.RemainingPhaseThreeSplit;
+                    if (ImGui.InputFloat(
+                        "Remaining Phase 3 Split %",
+                        ref remainingPhaseThree,
+                        0f,
+                        0f,
+                        "%.2f"))
+                    {
+                        gameState.Progressive.RemainingPhaseThreeSplit =
+                            Math.Clamp(remainingPhaseThree, 0f, 100f);
+                        changedGame = true;
+                    }
+
+                    float remainingTotal = gameState.Progressive.RemainingPhaseTwoSplit +
+                        gameState.Progressive.RemainingPhaseThreeSplit;
+                    if (Math.Abs(remainingTotal - 100f) > 0.01f)
+                    {
+                        ImGui.TextColored(
+                            new Vector4(1f, 0.35f, 0.35f, 1f),
+                            $"Remaining split total must equal 100%. Current: {remainingTotal:0.##}%");
+                    }
+                    else
+                    {
+                        ImGui.Text($"Remaining split total: {remainingTotal:0.##}%");
+                    }
+                }
+                else
+                {
+                    ImGui.Text("Phase 3 receives 100% of the remaining prize pool.");
+                }
+            }
+
+            if (changedGame)
+            {
+                EnsureProgressiveState();
+                if (!string.IsNullOrWhiteSpace(gameState.RoomCode))
+                {
+                    _ = Task.Run(SyncHostStateAsync);
+                }
             }
         }
 
@@ -1664,21 +1812,53 @@ namespace FFXIVBingo4All
         {
             foreach (var update in updates)
             {
-                RemoveIssuedCardsForPlayer(update.playerName);
-                if (update.newCount > 0)
+                var playerName = NormalizePlayerName(update.playerName);
+                if (update.newCount <= 0)
                 {
-                    var newSeed = Guid.NewGuid().ToString();
-                    var playerName = NormalizePlayerName(update.playerName);
-                    gameState.IssuedCards[newSeed] = new PlayerData
+                    RemoveIssuedCardsForPlayer(update.playerName);
+                    continue;
+                }
+
+                bool preserveSeed =
+                    IsProgressiveMode() &&
+                    gameState.Progressive.CurrentPhase > 1 &&
+                    !string.IsNullOrWhiteSpace(update.oldSeed) &&
+                    gameState.IssuedCards.ContainsKey(update.oldSeed);
+
+                if (preserveSeed)
+                {
+                    gameState.IssuedCards[update.oldSeed] = new PlayerData
                     {
                         PlayerName = playerName,
-                        CardCount = update.newCount,
+                        CardCount = Math.Clamp(update.newCount, 1, 16),
                         ShortCode = string.Empty,
                     };
                     _ = Task.Run(() =>
-                        CreateShortLinkForSeedAsync(newSeed, update.newCount, NormalizeLetters(gameState.CustomHeaderLetters), playerName));
+                        CreateShortLinkForSeedAsync(
+                            update.oldSeed,
+                            Math.Clamp(update.newCount, 1, 16),
+                            NormalizeLetters(gameState.CustomHeaderLetters),
+                            playerName));
+                    continue;
                 }
+
+                RemoveIssuedCardsForPlayer(update.playerName);
+                var newSeed = Guid.NewGuid().ToString();
+                gameState.IssuedCards[newSeed] = new PlayerData
+                {
+                    PlayerName = playerName,
+                    CardCount = Math.Clamp(update.newCount, 1, 16),
+                    ShortCode = string.Empty,
+                };
+                _ = Task.Run(() =>
+                    CreateShortLinkForSeedAsync(
+                        newSeed,
+                        Math.Clamp(update.newCount, 1, 16),
+                        NormalizeLetters(gameState.CustomHeaderLetters),
+                        playerName));
             }
+
+            MaybeRefreshProgressivePhaseSnapshot();
         }
 
         private void RemoveIssuedCardsForPlayer(string name)
@@ -1806,6 +1986,73 @@ namespace FFXIVBingo4All
             pendingPayoutStartTime = DateTime.UtcNow;
             pendingPayoutNextActionAt = DateTime.MinValue;
             payoutStatus = $"Payout started for {targetName}: {chunkText} gil (copied).";
+        }
+
+        private bool CanLockProgressivePhase(out string reason)
+        {
+            reason = string.Empty;
+            if (!IsProgressiveMode())
+            {
+                reason = "Not in progressive mode.";
+                return false;
+            }
+
+            EnsureProgressiveState();
+            if (gameState.Progressive.CurrentPhase >= 3)
+            {
+                reason = "Final progressive phase is already active.";
+                return false;
+            }
+
+            if (bingoCallers.Count == 0)
+            {
+                reason = "Wait for a bingo call before locking the phase.";
+                return false;
+            }
+
+            if (pendingPayoutStage != PayoutStage.None)
+            {
+                reason = "Finish the current payout before advancing.";
+                return false;
+            }
+
+            return true;
+        }
+
+        private void LockCurrentProgressivePhase()
+        {
+            if (!CanLockProgressivePhase(out var reason))
+            {
+                progressiveStatus = reason;
+                return;
+            }
+
+            EnsureProgressiveState();
+            int currentPhase = gameState.Progressive.CurrentPhase;
+            int lockedPayout = GetCurrentPrizePool();
+            switch (currentPhase)
+            {
+                case 1:
+                    gameState.Progressive.LockedPhaseOnePayout = lockedPayout;
+                    break;
+                case 2:
+                    gameState.Progressive.LockedPhaseTwoPayout = lockedPayout;
+                    break;
+            }
+
+            gameState.Progressive.CurrentPhase = Math.Clamp(currentPhase + 1, 1, 3);
+            gameState.Progressive.PhaseStartPrizePool = GetOverallPrizePool();
+            clearBingoStateOnNextSync = true;
+            progressiveStatus =
+                $"Locked Phase {currentPhase}. Now on {GetCurrentGameTypeLabel()}.";
+            lastBingoDisplay = string.Empty;
+            lastBingoTimestamp = 0;
+            bingoCallers.Clear();
+            paidOutCallers.Clear();
+            payoutPaid.Clear();
+            payoutStatus = string.Empty;
+            ClearPendingPayout();
+            _ = Task.Run(SyncHostStateAsync);
         }
 
         private static string ExtractFirstLastName(string? name)
@@ -2096,11 +2343,151 @@ namespace FFXIVBingo4All
             return $"{letter}-{number}";
         }
 
+        private bool IsProgressiveMode()
+        {
+            return string.Equals(
+                gameState.GameType,
+                "Progressive Bingo",
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void EnsureProgressiveState()
+        {
+            gameState.Progressive ??= new ProgressiveState();
+            gameState.Progressive.Enabled = IsProgressiveMode();
+            gameState.Progressive.CurrentPhase = Math.Clamp(gameState.Progressive.CurrentPhase, 1, 3);
+            gameState.Progressive.PhaseStartPrizePool = Math.Max(0, gameState.Progressive.PhaseStartPrizePool);
+            gameState.Progressive.PhaseOneSplit = Math.Clamp(gameState.Progressive.PhaseOneSplit, 0f, 100f);
+            gameState.Progressive.PhaseTwoSplit = Math.Clamp(gameState.Progressive.PhaseTwoSplit, 0f, 100f);
+            gameState.Progressive.PhaseThreeSplit = Math.Clamp(gameState.Progressive.PhaseThreeSplit, 0f, 100f);
+            gameState.Progressive.LockedPhaseOnePayout = Math.Max(0, gameState.Progressive.LockedPhaseOnePayout);
+            gameState.Progressive.LockedPhaseTwoPayout = Math.Max(0, gameState.Progressive.LockedPhaseTwoPayout);
+            gameState.Progressive.LockedPhaseThreePayout = Math.Max(0, gameState.Progressive.LockedPhaseThreePayout);
+
+            float remainingTotal = gameState.Progressive.RemainingPhaseTwoSplit +
+                gameState.Progressive.RemainingPhaseThreeSplit;
+            if (remainingTotal <= 0f)
+            {
+                float initialRemaining = gameState.Progressive.PhaseTwoSplit +
+                    gameState.Progressive.PhaseThreeSplit;
+                if (initialRemaining <= 0f)
+                {
+                    gameState.Progressive.RemainingPhaseTwoSplit = 50f;
+                    gameState.Progressive.RemainingPhaseThreeSplit = 50f;
+                }
+                else
+                {
+                    gameState.Progressive.RemainingPhaseTwoSplit =
+                        (gameState.Progressive.PhaseTwoSplit / initialRemaining) * 100f;
+                    gameState.Progressive.RemainingPhaseThreeSplit =
+                        100f - gameState.Progressive.RemainingPhaseTwoSplit;
+                }
+            }
+            else
+            {
+                gameState.Progressive.RemainingPhaseTwoSplit =
+                    (gameState.Progressive.RemainingPhaseTwoSplit / remainingTotal) * 100f;
+                gameState.Progressive.RemainingPhaseThreeSplit =
+                    100f - gameState.Progressive.RemainingPhaseTwoSplit;
+            }
+        }
+
+        private int GetTotalCardsSold()
+        {
+            return gameState.IssuedCards.Values.Sum(p => p.CardCount);
+        }
+
+        private int GetTotalPot()
+        {
+            return gameState.StartingPot + (GetTotalCardsSold() * gameState.CostPerCard);
+        }
+
+        private int GetOverallPrizePool()
+        {
+            return (int)MathF.Round(GetTotalPot() * (gameState.PrizePercentage / 100f));
+        }
+
+        private void MaybeRefreshProgressivePhaseSnapshot()
+        {
+            if (!IsProgressiveMode())
+            {
+                return;
+            }
+
+            EnsureProgressiveState();
+            if (bingoCallers.Count > 0)
+            {
+                return;
+            }
+
+            gameState.Progressive.PhaseStartPrizePool = GetOverallPrizePool();
+        }
+
+        private string GetCurrentGameTypeLabel()
+        {
+            if (!IsProgressiveMode())
+            {
+                return gameState.GameType;
+            }
+
+            EnsureProgressiveState();
+            return gameState.Progressive.CurrentPhase switch
+            {
+                1 => "Progressive Phase 1 - Single Line",
+                2 => "Progressive Phase 2 - Double Line",
+                _ => "Progressive Phase 3 - Blackout",
+            };
+        }
+
+        private float GetCurrentPhaseSplitPercent()
+        {
+            if (!IsProgressiveMode())
+            {
+                return 100f;
+            }
+
+            EnsureProgressiveState();
+            return gameState.Progressive.CurrentPhase switch
+            {
+                1 => gameState.Progressive.PhaseOneSplit,
+                2 => gameState.Progressive.RemainingPhaseTwoSplit,
+                _ => 100f,
+            };
+        }
+
+        private int GetLockedProgressivePayoutBeforeCurrentPhase()
+        {
+            if (!IsProgressiveMode())
+            {
+                return 0;
+            }
+
+            EnsureProgressiveState();
+            return gameState.Progressive.CurrentPhase switch
+            {
+                1 => 0,
+                2 => gameState.Progressive.LockedPhaseOnePayout,
+                _ => gameState.Progressive.LockedPhaseOnePayout + gameState.Progressive.LockedPhaseTwoPayout,
+            };
+        }
+
+        private int GetCurrentPrizePool()
+        {
+            if (!IsProgressiveMode())
+            {
+                return GetOverallPrizePool();
+            }
+
+            EnsureProgressiveState();
+            int remainingPrizePool = Math.Max(
+                0,
+                gameState.Progressive.PhaseStartPrizePool - GetLockedProgressivePayoutBeforeCurrentPhase());
+            return (int)MathF.Round(remainingPrizePool * (GetCurrentPhaseSplitPercent() / 100f));
+        }
+
         private int GetPrizeSplit()
         {
-            int totalCards = gameState.IssuedCards.Values.Sum(p => p.CardCount);
-            int totalPot = gameState.StartingPot + (totalCards * gameState.CostPerCard);
-            int prizePool = (int)MathF.Round(totalPot * (gameState.PrizePercentage / 100f));
+            int prizePool = GetCurrentPrizePool();
             int bingoCount = Math.Max(1, bingoCallers.Count);
             return prizePool / bingoCount;
         }
@@ -2628,11 +3015,19 @@ namespace FFXIVBingo4All
             lastPostStatus = string.Empty;
             lastBingoDisplay = string.Empty;
             lastBingoTimestamp = 0;
+            progressiveStatus = string.Empty;
             bingoCallers.Clear();
             paidOutCallers.Clear();
             payoutStatus = string.Empty;
             ClearPendingPayout();
             payoutPaid.Clear();
+            clearBingoStateOnNextSync = true;
+            EnsureProgressiveState();
+            gameState.Progressive.CurrentPhase = 1;
+            gameState.Progressive.LockedPhaseOnePayout = 0;
+            gameState.Progressive.LockedPhaseTwoPayout = 0;
+            gameState.Progressive.LockedPhaseThreePayout = 0;
+            gameState.Progressive.PhaseStartPrizePool = GetOverallPrizePool();
             lock (roomStateLock)
             {
                 roomDaubs.Clear();
@@ -2651,11 +3046,13 @@ namespace FFXIVBingo4All
             lastPostStatus = string.Empty;
             lastBingoDisplay = string.Empty;
             lastBingoTimestamp = 0;
+            progressiveStatus = string.Empty;
             bingoCallers.Clear();
             paidOutCallers.Clear();
             payoutStatus = string.Empty;
             ClearPendingPayout();
             payoutPaid.Clear();
+            clearBingoStateOnNextSync = false;
             lock (roomStateLock)
             {
                 roomDaubs.Clear();
@@ -2671,6 +3068,7 @@ namespace FFXIVBingo4All
             }
 
             gameState.RoomCode = roomCode;
+            progressiveStatus = string.Empty;
             ClearPendingPayout();
             payoutPaid.Clear();
             _ = Task.Run(() => FetchRoomStateAsync(true));
@@ -2707,6 +3105,21 @@ namespace FFXIVBingo4All
             public string UpdatedAt { get; set; } = "-";
         }
 
+        private sealed class ProgressiveState
+        {
+            public bool Enabled { get; set; } = false;
+            public int CurrentPhase { get; set; } = 1;
+            public int PhaseStartPrizePool { get; set; } = 0;
+            public float PhaseOneSplit { get; set; } = 34f;
+            public float PhaseTwoSplit { get; set; } = 33f;
+            public float PhaseThreeSplit { get; set; } = 33f;
+            public float RemainingPhaseTwoSplit { get; set; } = 50f;
+            public float RemainingPhaseThreeSplit { get; set; } = 50f;
+            public int LockedPhaseOnePayout { get; set; } = 0;
+            public int LockedPhaseTwoPayout { get; set; } = 0;
+            public int LockedPhaseThreePayout { get; set; } = 0;
+        }
+
         private sealed class GameState
         {
             public string RoomCode { get; set; } = string.Empty;
@@ -2718,6 +3131,7 @@ namespace FFXIVBingo4All
             public string CustomHeaderLetters { get; set; } = "BINGO";
             public string VenueName { get; set; } = "FFXIV Bingo";
             public string GameType { get; set; } = "Single Line";
+            public ProgressiveState Progressive { get; set; } = new();
             public Vector4 BgColor { get; set; } = new(0.07f, 0.08f, 0.09f, 1.0f);
             public Vector4 CardColor { get; set; } = new(0.11f, 0.13f, 0.15f, 1.0f);
             public Vector4 HeaderColor { get; set; } = new(0.16f, 0.19f, 0.23f, 1.0f);
@@ -2931,7 +3345,16 @@ namespace FFXIVBingo4All
                         gameState.PrizePercentage = Math.Clamp((float)prizePercent, 0f, 100f);
                     }
 
-                    if (root.TryGetProperty("gameType", out var gameEl) &&
+                    if (root.TryGetProperty("gameTypeBase", out var gameBaseEl) &&
+                        gameBaseEl.ValueKind == JsonValueKind.String)
+                    {
+                        var nextGame = gameBaseEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(nextGame))
+                        {
+                            gameState.GameType = nextGame.Trim();
+                        }
+                    }
+                    else if (root.TryGetProperty("gameType", out var gameEl) &&
                         gameEl.ValueKind == JsonValueKind.String)
                     {
                         var nextGame = gameEl.GetString();
@@ -2940,6 +3363,58 @@ namespace FFXIVBingo4All
                             gameState.GameType = nextGame.Trim();
                         }
                     }
+
+                    if (root.TryGetProperty("progressive", out var progressiveEl) &&
+                        progressiveEl.ValueKind == JsonValueKind.Object)
+                    {
+                        gameState.Progressive = new ProgressiveState
+                        {
+                            Enabled = progressiveEl.TryGetProperty("enabled", out var enabledEl) &&
+                                enabledEl.ValueKind is JsonValueKind.True or JsonValueKind.False &&
+                                enabledEl.GetBoolean(),
+                            CurrentPhase = progressiveEl.TryGetProperty("currentPhase", out var phaseEl) &&
+                                phaseEl.TryGetInt32(out var phase)
+                                ? Math.Clamp(phase, 1, 3)
+                                : 1,
+                            PhaseStartPrizePool = progressiveEl.TryGetProperty("phaseStartPrizePool", out var poolEl) &&
+                                poolEl.TryGetInt32(out var pool)
+                                ? Math.Max(0, pool)
+                                : 0,
+                            PhaseOneSplit = progressiveEl.TryGetProperty("phaseOneSplit", out var phaseOneEl) &&
+                                phaseOneEl.TryGetSingle(out var phaseOne)
+                                ? Math.Clamp(phaseOne, 0f, 100f)
+                                : 34f,
+                            PhaseTwoSplit = progressiveEl.TryGetProperty("phaseTwoSplit", out var phaseTwoEl) &&
+                                phaseTwoEl.TryGetSingle(out var phaseTwo)
+                                ? Math.Clamp(phaseTwo, 0f, 100f)
+                                : 33f,
+                            PhaseThreeSplit = progressiveEl.TryGetProperty("phaseThreeSplit", out var phaseThreeEl) &&
+                                phaseThreeEl.TryGetSingle(out var phaseThree)
+                                ? Math.Clamp(phaseThree, 0f, 100f)
+                                : 33f,
+                            RemainingPhaseTwoSplit = progressiveEl.TryGetProperty("remainingPhaseTwoSplit", out var remainTwoEl) &&
+                                remainTwoEl.TryGetSingle(out var remainTwo)
+                                ? Math.Clamp(remainTwo, 0f, 100f)
+                                : 50f,
+                            RemainingPhaseThreeSplit = progressiveEl.TryGetProperty("remainingPhaseThreeSplit", out var remainThreeEl) &&
+                                remainThreeEl.TryGetSingle(out var remainThree)
+                                ? Math.Clamp(remainThree, 0f, 100f)
+                                : 50f,
+                            LockedPhaseOnePayout = progressiveEl.TryGetProperty("lockedPhaseOnePayout", out var lockedOneEl) &&
+                                lockedOneEl.TryGetInt32(out var lockedOne)
+                                ? Math.Max(0, lockedOne)
+                                : 0,
+                            LockedPhaseTwoPayout = progressiveEl.TryGetProperty("lockedPhaseTwoPayout", out var lockedTwoEl) &&
+                                lockedTwoEl.TryGetInt32(out var lockedTwo)
+                                ? Math.Max(0, lockedTwo)
+                                : 0,
+                            LockedPhaseThreePayout = progressiveEl.TryGetProperty("lockedPhaseThreePayout", out var lockedThreeEl) &&
+                                lockedThreeEl.TryGetInt32(out var lockedThree)
+                                ? Math.Max(0, lockedThree)
+                                : 0,
+                        };
+                    }
+                    EnsureProgressiveState();
 
                     if (root.TryGetProperty("letters", out var lettersEl) &&
                         lettersEl.ValueKind == JsonValueKind.String)
@@ -3159,3 +3634,6 @@ namespace FFXIVBingo4All
         }
     }
 }
+
+
+

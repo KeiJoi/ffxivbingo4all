@@ -118,6 +118,148 @@ function touchSession(session) {
   session.updatedAt = Date.now();
 }
 
+const PROGRESSIVE_GAME_TYPE = "Progressive Bingo";
+
+function isProgressiveGameType(value) {
+  return (
+    typeof value === "string" &&
+    value.trim().toLowerCase() === PROGRESSIVE_GAME_TYPE.toLowerCase()
+  );
+}
+
+function clampPercentage(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return Math.min(Math.max(parsed, 0), 100);
+}
+
+function defaultProgressiveState() {
+  return {
+    enabled: false,
+    currentPhase: 1,
+    phaseStartPrizePool: 0,
+    phaseOneSplit: 34,
+    phaseTwoSplit: 33,
+    phaseThreeSplit: 33,
+    remainingPhaseTwoSplit: 50,
+    remainingPhaseThreeSplit: 50,
+    lockedPhaseOnePayout: 0,
+    lockedPhaseTwoPayout: 0,
+    lockedPhaseThreePayout: 0,
+  };
+}
+
+function deriveRemainingProgressiveSplits(progressive) {
+  const phaseTwo = clampPercentage(progressive.phaseTwoSplit);
+  const phaseThree = clampPercentage(progressive.phaseThreeSplit);
+  const total = phaseTwo + phaseThree;
+  if (total <= 0) {
+    return {
+      remainingPhaseTwoSplit: 50,
+      remainingPhaseThreeSplit: 50,
+    };
+  }
+
+  const phaseTwoShare = (phaseTwo / total) * 100;
+  return {
+    remainingPhaseTwoSplit: phaseTwoShare,
+    remainingPhaseThreeSplit: 100 - phaseTwoShare,
+  };
+}
+
+function normalizeProgressiveState(raw, gameType) {
+  const defaults = defaultProgressiveState();
+  const state =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? { ...defaults, ...raw }
+      : { ...defaults };
+
+  state.enabled = Boolean(state.enabled) || isProgressiveGameType(gameType);
+  state.currentPhase = Math.min(
+    3,
+    Math.max(1, Math.floor(Number(state.currentPhase) || defaults.currentPhase))
+  );
+  state.phaseStartPrizePool = Math.max(
+    0,
+    Math.floor(Number(state.phaseStartPrizePool) || 0)
+  );
+  state.phaseOneSplit = clampPercentage(state.phaseOneSplit);
+  state.phaseTwoSplit = clampPercentage(state.phaseTwoSplit);
+  state.phaseThreeSplit = clampPercentage(state.phaseThreeSplit);
+
+  const derivedRemaining = deriveRemainingProgressiveSplits(state);
+  state.remainingPhaseTwoSplit = clampPercentage(
+    state.remainingPhaseTwoSplit ?? derivedRemaining.remainingPhaseTwoSplit
+  );
+  state.remainingPhaseThreeSplit = clampPercentage(
+    state.remainingPhaseThreeSplit ?? derivedRemaining.remainingPhaseThreeSplit
+  );
+
+  const remainingTotal =
+    state.remainingPhaseTwoSplit + state.remainingPhaseThreeSplit;
+  if (remainingTotal > 0) {
+    state.remainingPhaseTwoSplit =
+      (state.remainingPhaseTwoSplit / remainingTotal) * 100;
+    state.remainingPhaseThreeSplit = 100 - state.remainingPhaseTwoSplit;
+  } else {
+    state.remainingPhaseTwoSplit = derivedRemaining.remainingPhaseTwoSplit;
+    state.remainingPhaseThreeSplit = derivedRemaining.remainingPhaseThreeSplit;
+  }
+
+  state.lockedPhaseOnePayout = Math.max(
+    0,
+    Math.floor(Number(state.lockedPhaseOnePayout) || 0)
+  );
+  state.lockedPhaseTwoPayout = Math.max(
+    0,
+    Math.floor(Number(state.lockedPhaseTwoPayout) || 0)
+  );
+  state.lockedPhaseThreePayout = Math.max(
+    0,
+    Math.floor(Number(state.lockedPhaseThreePayout) || 0)
+  );
+
+  return state;
+}
+
+function getProgressivePhaseLabel(progressive) {
+  const phase = Math.min(3, Math.max(1, Number(progressive?.currentPhase) || 1));
+  if (phase === 1) {
+    return "Progressive Phase 1 - Single Line";
+  }
+  if (phase === 2) {
+    return "Progressive Phase 2 - Double Line";
+  }
+  return "Progressive Phase 3 - Blackout";
+}
+
+function getRoomGameTypeLabel(state) {
+  if (isProgressiveGameType(state?.gameType) && state?.progressive?.enabled) {
+    return getProgressivePhaseLabel(state.progressive);
+  }
+  return typeof state?.gameType === "string" && state.gameType.trim()
+    ? state.gameType.trim()
+    : "Single Line";
+}
+
+function getRoomRuleGameType(state) {
+  if (isProgressiveGameType(state?.gameType) && state?.progressive?.enabled) {
+    const phase = Number(state.progressive.currentPhase) || 1;
+    if (phase === 1) {
+      return "Single Line";
+    }
+    if (phase === 2) {
+      return "Two Lines";
+    }
+    return "Blackout";
+  }
+  return typeof state?.gameType === "string" && state.gameType.trim()
+    ? state.gameType.trim()
+    : "Single Line";
+}
+
 function normalizePlayers(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return {};
@@ -223,6 +365,7 @@ function defaultRoomState() {
     startingPot: 0,
     prizePercentage: 0,
     gameType: "Single Line",
+    progressive: defaultProgressiveState(),
     letters: "BINGO",
     title: "FFXIV Bingo",
     colors: {
@@ -273,6 +416,7 @@ function normalizeRoomState(raw) {
   } else {
     state.gameType = state.gameType.trim();
   }
+  state.progressive = normalizeProgressiveState(state.progressive, state.gameType);
   if (typeof state.letters !== "string" || !state.letters.trim()) {
     state.letters = defaults.letters;
   } else {
@@ -455,6 +599,8 @@ app.post("/api/host-sync", async (req, res) => {
     allowedCards,
     players,
     gameType,
+    progressive,
+    clearBingoState,
     costPerCard,
     startingPot,
     prizePercentage,
@@ -491,6 +637,10 @@ app.post("/api/host-sync", async (req, res) => {
     : session.calledNumbers;
   session.players = normalizePlayers(players);
   session.allowedCards = buildAllowedCards(session.players, allowedCards);
+  if (clearBingoState) {
+    session.lastBingo = null;
+    session.bingoCalls = [];
+  }
 
   const allowedSet = new Set(Object.keys(session.allowedCards));
   Object.keys(session.daubs).forEach((seed) => {
@@ -502,6 +652,7 @@ app.post("/api/host-sync", async (req, res) => {
   if (typeof gameType === "string" && gameType.trim().length > 0) {
     session.gameType = gameType.trim();
   }
+  session.progressive = normalizeProgressiveState(progressive, session.gameType);
   if (Number.isFinite(costPerCard)) {
     session.costPerCard = Math.max(0, Math.floor(Number(costPerCard)));
   }
@@ -540,7 +691,10 @@ app.post("/api/host-sync", async (req, res) => {
     costPerCard: session.costPerCard,
     startingPot: session.startingPot,
     prizePercentage: session.prizePercentage,
-    gameType: session.gameType,
+    gameType: getRoomRuleGameType(session),
+    gameTypeBase: session.gameType,
+    displayGameType: getRoomGameTypeLabel(session),
+    progressive: session.progressive,
     letters: session.letters,
     title: session.title,
     colors: session.colors,
@@ -559,7 +713,10 @@ app.post("/api/host-sync", async (req, res) => {
     costPerCard: session.costPerCard,
     startingPot: session.startingPot,
     prizePercentage: session.prizePercentage,
-    gameType: session.gameType,
+    gameType: getRoomRuleGameType(session),
+    gameTypeBase: session.gameType,
+    displayGameType: getRoomGameTypeLabel(session),
+    progressive: session.progressive,
     letters: session.letters,
     title: session.title,
     colors: session.colors,
@@ -591,7 +748,7 @@ app.get("/api/admin/rooms", async (req, res) => {
       bingoCallsCount: Array.isArray(session.bingoCalls)
         ? session.bingoCalls.length
         : 0,
-      gameType: session.gameType,
+      gameType: getRoomGameTypeLabel(session),
       updatedAt: row.updated_at || null,
     };
   });
@@ -618,7 +775,7 @@ app.get("/api/rooms", async (req, res) => {
       bingoCallsCount: Array.isArray(room.bingoCalls)
         ? room.bingoCalls.length
         : 0,
-      gameType: room.gameType,
+      gameType: getRoomGameTypeLabel(room),
       updatedAt: room.updatedAt || null,
     };
   });
@@ -692,7 +849,10 @@ app.get("/api/room-state", async (req, res) => {
     costPerCard: session.costPerCard,
     startingPot: session.startingPot,
     prizePercentage: session.prizePercentage,
-    gameType: session.gameType,
+    gameType: getRoomRuleGameType(session),
+    gameTypeBase: session.gameType,
+    displayGameType: getRoomGameTypeLabel(session),
+    progressive: session.progressive,
     letters: session.letters,
     title: session.title,
     colors: session.colors,
@@ -864,6 +1024,9 @@ io.on("connection", (socket) => {
         daubs: {},
         bingoCalls: [],
         enforceSeeds: false,
+        gameTypeBase: "Single Line",
+        displayGameType: "Single Line",
+        progressive: defaultProgressiveState(),
       });
       return;
     }
@@ -878,6 +1041,9 @@ io.on("connection", (socket) => {
         daubs: {},
         bingoCalls: [],
         enforceSeeds: false,
+        gameTypeBase: "Single Line",
+        displayGameType: "Single Line",
+        progressive: defaultProgressiveState(),
       });
       return;
     }
@@ -911,7 +1077,10 @@ io.on("connection", (socket) => {
       costPerCard: session.costPerCard,
       startingPot: session.startingPot,
       prizePercentage: session.prizePercentage,
-      gameType: session.gameType,
+      gameType: getRoomRuleGameType(session),
+      gameTypeBase: session.gameType,
+      displayGameType: getRoomGameTypeLabel(session),
+      progressive: session.progressive,
       letters: session.letters,
       title: session.title,
       colors: session.colors,
@@ -953,6 +1122,10 @@ io.on("connection", (socket) => {
     session.lastBingo = {
       name: caller,
       seed: typeof seed === "string" ? seed : null,
+      phase:
+        session.progressive && session.progressive.enabled
+          ? session.progressive.currentPhase
+          : null,
       timestamp: Date.now(),
     };
     if (!Array.isArray(session.bingoCalls)) {
@@ -961,6 +1134,10 @@ io.on("connection", (socket) => {
     session.bingoCalls.push({
       name: caller,
       seed: typeof seed === "string" ? seed : null,
+      phase:
+        session.progressive && session.progressive.enabled
+          ? session.progressive.currentPhase
+          : null,
       timestamp: Date.now(),
     });
     touchSession(session);
@@ -969,6 +1146,10 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("bingo_called", {
       roomCode,
       name: caller,
+      phase:
+        session.progressive && session.progressive.enabled
+          ? session.progressive.currentPhase
+          : null,
       timestamp: Date.now(),
     });
   });
