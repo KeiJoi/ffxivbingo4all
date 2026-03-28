@@ -897,6 +897,24 @@ function connectSocket(serverUrl) {
       Number(payload.startingPot),
       Number(payload.prizePercentage)
     );
+    if (Array.isArray(payload.bingoCalls)) {
+      bingoCalls.length = 0;
+      payload.bingoCalls.forEach((call) => {
+        if (call && typeof call === "object") {
+          bingoCalls.push({
+            name: call.name,
+            timestamp: call.timestamp,
+          });
+        }
+      });
+      renderBingoCalls();
+    }
+    if (payload.lastBingo && payload.lastBingo.name) {
+      setBingoBanner(`BINGO called by ${payload.lastBingo.name}!`);
+    } else {
+      setBingoBanner("");
+    }
+    updateBingoState();
   });
 
   socket.on("number_called", (payload) => {
@@ -968,6 +986,7 @@ if (!linkBlocked) {
     initializePage();
   }
 }
+
 
 
 
