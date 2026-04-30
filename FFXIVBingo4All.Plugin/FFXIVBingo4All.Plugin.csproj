@@ -1,4 +1,4 @@
-<Project Sdk="Dalamud.NET.Sdk/14.0.1">
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
 
   <PropertyGroup>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -11,7 +11,7 @@
     <Punchline>Bingo host relay and client management.</Punchline>
     <Description>Host relay plugin for multi-card bingo sessions.</Description>
     <ApplicableVersion>any</ApplicableVersion>
-    <DalamudApiLevel>14</DalamudApiLevel>
+    <DalamudApiLevel>15</DalamudApiLevel>
     <AssemblyVersion>1.0.0.6</AssemblyVersion>
   </PropertyGroup>
 

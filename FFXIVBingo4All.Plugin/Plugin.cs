@@ -10,11 +10,13 @@ using System.Numerics;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Globalization;
+using Dalamud.Game.Chat;
 using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Game.Command;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Game.ClientState.Objects.Enums;
+using Dalamud.Game.ClientState.Objects.SubKinds;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
@@ -153,6 +155,9 @@ namespace FFXIVBingo4All
         private int broadcastCommandIndex = 0;
         private string broadcastCopyStatus = string.Empty;
         private string skinCopyStatus = string.Empty;
+        private string skinPresetStatus = string.Empty;
+        private string skinPresetNameInput = string.Empty;
+        private int selectedSkinPresetIndex = -1;
         private int gameTypeIndex = 0;
 
         private static readonly string[] BroadcastCommands = { "/yell", "/shout" };
@@ -173,6 +178,7 @@ namespace FFXIVBingo4All
             webClientUrlInput = configuration.ClientBaseUrl;
             adminKeyInput = configuration.AdminKey;
             roomKeyInput = configuration.RoomKey;
+            InitializeSkinPresets();
             ECommonsMain.Init(PluginInterface, this);
 
             ChatGui.ChatMessage += OnChatMessage;
@@ -222,12 +228,7 @@ namespace FFXIVBingo4All
             isOpen = true;
         }
 
-        private void OnChatMessage(
-            XivChatType type,
-            int timestamp,
-            ref SeString sender,
-            ref SeString message,
-            ref bool isHandled)
+        private void OnChatMessage(IChatMessage chatMessage)
         {
             if (!parseRollsEnabled)
             {
@@ -237,6 +238,8 @@ namespace FFXIVBingo4All
                 }
             }
 
+            var message = chatMessage.Message;
+            var sender = chatMessage.Sender;
             var text = message.TextValue;
             if (text.StartsWith("[Bingo]", StringComparison.OrdinalIgnoreCase))
             {
@@ -267,7 +270,7 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            DebugChat($"Roll detected: {rolled} (sender: {senderName}, type: {type})");
+            DebugChat($"Roll detected: {rolled} (sender: {senderName}, type: {chatMessage.LogKind})");
             TryHandleCallNumber(rolled, "roll");
         }
 
@@ -717,14 +720,10 @@ namespace FFXIVBingo4All
             if (ImGui.Button("Use Target"))
             {
                 playerStatus = string.Empty;
-                var target = TargetManager.Target as IGameObject;
+                var target = TargetManager.Target as IPlayerCharacter;
                 if (target == null)
                 {
                     playerStatus = "Target a player to fill the name.";
-                }
-                else if (target.ObjectKind != ObjectKind.Player)
-                {
-                    playerStatus = "Target must be a player.";
                 }
                 else
                 {
@@ -1117,78 +1116,7 @@ namespace FFXIVBingo4All
         private void DrawUiSettingsTab()
         {
             ImGui.Text("Skin Settings");
-            bool inRoom = !string.IsNullOrWhiteSpace(gameState.RoomCode);
-            if (inRoom)
-            {
-                ImGui.TextDisabled("Leave the room to edit settings.");
-                ImGui.BeginDisabled();
-            }
-
-            bool changed = false;
-
-            var bg = gameState.BgColor;
-            if (ImGui.ColorEdit4("BG Color", ref bg))
-            {
-                gameState.BgColor = bg;
-                changed = true;
-            }
-
-            var card = gameState.CardColor;
-            if (ImGui.ColorEdit4("Card Color", ref card))
-            {
-                gameState.CardColor = card;
-                changed = true;
-            }
-
-            var header = gameState.HeaderColor;
-            if (ImGui.ColorEdit4("Header Color", ref header))
-            {
-                gameState.HeaderColor = header;
-                changed = true;
-            }
-
-            var text = gameState.TextColor;
-            if (ImGui.ColorEdit4("Text Color", ref text))
-            {
-                gameState.TextColor = text;
-                changed = true;
-            }
-
-            var daub = gameState.DaubColor;
-            if (ImGui.ColorEdit4("Daub Color", ref daub))
-            {
-                gameState.DaubColor = daub;
-                changed = true;
-            }
-
-            var ball = gameState.BallColor;
-            if (ImGui.ColorEdit4("Ball Color", ref ball))
-            {
-                gameState.BallColor = ball;
-                changed = true;
-            }
-
-            if (ImGui.Button("SKIN ME"))
-            {
-                var skin = BuildSkinQueryString();
-                ImGui.SetClipboardText(skin);
-                skinCopyStatus = "Skin copied.";
-            }
-
-            if (!string.IsNullOrWhiteSpace(skinCopyStatus))
-            {
-                ImGui.Text(skinCopyStatus);
-            }
-
-            if (changed && !string.IsNullOrWhiteSpace(gameState.RoomCode))
-            {
-                _ = Task.Run(SyncHostStateAsync);
-            }
-
-            if (inRoom)
-            {
-                ImGui.EndDisabled();
-            }
+            DrawSkinEditor(allowEditingInRoom: false);
         }
 
         private void DrawPlayersPanel()
@@ -1439,67 +1367,7 @@ namespace FFXIVBingo4All
                 return;
             }
 
-            bool changed = false;
-
-            var bg = gameState.BgColor;
-            if (ImGui.ColorEdit4("BG Color", ref bg))
-            {
-                gameState.BgColor = bg;
-                changed = true;
-            }
-
-            var card = gameState.CardColor;
-            if (ImGui.ColorEdit4("Card Color", ref card))
-            {
-                gameState.CardColor = card;
-                changed = true;
-            }
-
-            var header = gameState.HeaderColor;
-            if (ImGui.ColorEdit4("Header Color", ref header))
-            {
-                gameState.HeaderColor = header;
-                changed = true;
-            }
-
-            var text = gameState.TextColor;
-            if (ImGui.ColorEdit4("Text Color", ref text))
-            {
-                gameState.TextColor = text;
-                changed = true;
-            }
-
-            var daub = gameState.DaubColor;
-            if (ImGui.ColorEdit4("Daub Color", ref daub))
-            {
-                gameState.DaubColor = daub;
-                changed = true;
-            }
-
-            var ball = gameState.BallColor;
-            if (ImGui.ColorEdit4("Ball Color", ref ball))
-            {
-                gameState.BallColor = ball;
-                changed = true;
-            }
-
-            if (ImGui.Button("SKIN ME"))
-            {
-                var skin = BuildSkinQueryString();
-                ImGui.SetClipboardText(skin);
-                skinCopyStatus = "Skin copied.";
-            }
-
-            if (!string.IsNullOrWhiteSpace(skinCopyStatus))
-            {
-                ImGui.Text(skinCopyStatus);
-            }
-
-            if (changed && !string.IsNullOrWhiteSpace(gameState.RoomCode))
-            {
-                _ = Task.Run(SyncHostStateAsync);
-            }
-
+            DrawSkinEditor(allowEditingInRoom: true);
             ImGui.End();
         }
 
@@ -1888,8 +1756,8 @@ namespace FFXIVBingo4All
         private bool TryGetTargetPlayerName(out string name)
         {
             name = string.Empty;
-            var target = TargetManager.Target as IGameObject;
-            if (target == null || target.ObjectKind != ObjectKind.Player)
+            var target = TargetManager.Target as IPlayerCharacter;
+            if (target == null)
             {
                 return false;
             }
@@ -2100,6 +1968,319 @@ namespace FFXIVBingo4All
             }
 
             return new string(letters);
+        }
+
+        private void InitializeSkinPresets()
+        {
+            configuration.SkinPresets ??= new List<SkinPreset>();
+            bool changed = false;
+
+            if (configuration.SkinPresets.Count == 0)
+            {
+                configuration.SkinPresets.Add(CaptureCurrentSkinPreset("Default"));
+                configuration.LastSkinPresetName = "Default";
+                changed = true;
+            }
+
+            selectedSkinPresetIndex = FindSkinPresetIndex(configuration.LastSkinPresetName);
+            if (selectedSkinPresetIndex < 0 && configuration.SkinPresets.Count > 0)
+            {
+                selectedSkinPresetIndex = 0;
+                configuration.LastSkinPresetName = configuration.SkinPresets[0].Name;
+                changed = true;
+            }
+
+            if (selectedSkinPresetIndex >= 0)
+            {
+                ApplySkinPreset(configuration.SkinPresets[selectedSkinPresetIndex]);
+                skinPresetNameInput = configuration.SkinPresets[selectedSkinPresetIndex].Name;
+            }
+
+            if (changed)
+            {
+                configuration.Save();
+            }
+        }
+
+        private void DrawSkinEditor(bool allowEditingInRoom)
+        {
+            bool inRoom = !string.IsNullOrWhiteSpace(gameState.RoomCode);
+            bool disableEditor = inRoom && !allowEditingInRoom;
+            if (disableEditor)
+            {
+                ImGui.TextDisabled("Leave the room to edit settings.");
+                ImGui.BeginDisabled();
+            }
+
+            DrawSkinPresetControls(allowEditingInRoom);
+
+            bool changed = false;
+
+            var bg = gameState.BgColor;
+            if (ImGui.ColorEdit4("BG Color", ref bg))
+            {
+                gameState.BgColor = bg;
+                changed = true;
+            }
+
+            var card = gameState.CardColor;
+            if (ImGui.ColorEdit4("Card Color", ref card))
+            {
+                gameState.CardColor = card;
+                changed = true;
+            }
+
+            var header = gameState.HeaderColor;
+            if (ImGui.ColorEdit4("Header Color", ref header))
+            {
+                gameState.HeaderColor = header;
+                changed = true;
+            }
+
+            var text = gameState.TextColor;
+            if (ImGui.ColorEdit4("Text Color", ref text))
+            {
+                gameState.TextColor = text;
+                changed = true;
+            }
+
+            var daub = gameState.DaubColor;
+            if (ImGui.ColorEdit4("Daub Color", ref daub))
+            {
+                gameState.DaubColor = daub;
+                changed = true;
+            }
+
+            var ball = gameState.BallColor;
+            if (ImGui.ColorEdit4("Ball Color", ref ball))
+            {
+                gameState.BallColor = ball;
+                changed = true;
+            }
+
+            if (ImGui.Button("SKIN ME"))
+            {
+                var skin = BuildSkinQueryString();
+                ImGui.SetClipboardText(skin);
+                skinCopyStatus = "Skin copied.";
+            }
+
+            if (!string.IsNullOrWhiteSpace(skinCopyStatus))
+            {
+                ImGui.Text(skinCopyStatus);
+            }
+
+            if (changed && !string.IsNullOrWhiteSpace(gameState.RoomCode))
+            {
+                _ = Task.Run(SyncHostStateAsync);
+            }
+
+            if (disableEditor)
+            {
+                ImGui.EndDisabled();
+            }
+        }
+
+        private void DrawSkinPresetControls(bool syncRoomState)
+        {
+            string preview = selectedSkinPresetIndex >= 0 &&
+                             selectedSkinPresetIndex < configuration.SkinPresets.Count
+                ? configuration.SkinPresets[selectedSkinPresetIndex].Name
+                : "No preset selected";
+
+            if (ImGui.BeginCombo("Preset", preview))
+            {
+                for (int i = 0; i < configuration.SkinPresets.Count; i++)
+                {
+                    bool isSelected = i == selectedSkinPresetIndex;
+                    string name = configuration.SkinPresets[i].Name;
+                    if (ImGui.Selectable(name, isSelected))
+                    {
+                        SelectSkinPreset(i, syncRoomState);
+                    }
+
+                    if (isSelected)
+                    {
+                        ImGui.SetItemDefaultFocus();
+                    }
+                }
+
+                ImGui.EndCombo();
+            }
+
+            ImGui.InputText("Preset Name", ref skinPresetNameInput, 64);
+
+            if (ImGui.Button("Save Preset"))
+            {
+                SaveCurrentSkinPreset();
+            }
+
+            ImGui.SameLine();
+            bool canDelete = selectedSkinPresetIndex >= 0 &&
+                             selectedSkinPresetIndex < configuration.SkinPresets.Count;
+            if (!canDelete)
+            {
+                ImGui.BeginDisabled();
+            }
+
+            if (ImGui.Button("Delete Preset"))
+            {
+                DeleteSelectedSkinPreset(syncRoomState);
+            }
+
+            if (!canDelete)
+            {
+                ImGui.EndDisabled();
+            }
+
+            if (!string.IsNullOrWhiteSpace(skinPresetStatus))
+            {
+                ImGui.Text(skinPresetStatus);
+            }
+        }
+
+        private void SaveCurrentSkinPreset()
+        {
+            string fallbackName = selectedSkinPresetIndex >= 0 &&
+                                  selectedSkinPresetIndex < configuration.SkinPresets.Count
+                ? configuration.SkinPresets[selectedSkinPresetIndex].Name
+                : string.Empty;
+            string name = NormalizeSkinPresetName(
+                string.IsNullOrWhiteSpace(skinPresetNameInput) ? fallbackName : skinPresetNameInput);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                skinPresetStatus = "Enter a preset name first.";
+                return;
+            }
+
+            var preset = CaptureCurrentSkinPreset(name);
+            int existingIndex = FindSkinPresetIndex(name);
+            if (existingIndex >= 0)
+            {
+                configuration.SkinPresets[existingIndex] = preset;
+                selectedSkinPresetIndex = existingIndex;
+                skinPresetStatus = $"Preset \"{name}\" updated.";
+            }
+            else
+            {
+                configuration.SkinPresets.Add(preset);
+                selectedSkinPresetIndex = configuration.SkinPresets.Count - 1;
+                skinPresetStatus = $"Preset \"{name}\" saved.";
+            }
+
+            skinPresetNameInput = name;
+            configuration.LastSkinPresetName = name;
+            configuration.Save();
+        }
+
+        private void DeleteSelectedSkinPreset(bool syncRoomState)
+        {
+            if (selectedSkinPresetIndex < 0 ||
+                selectedSkinPresetIndex >= configuration.SkinPresets.Count)
+            {
+                skinPresetStatus = "No preset selected.";
+                return;
+            }
+
+            string removedName = configuration.SkinPresets[selectedSkinPresetIndex].Name;
+            configuration.SkinPresets.RemoveAt(selectedSkinPresetIndex);
+
+            if (configuration.SkinPresets.Count == 0)
+            {
+                selectedSkinPresetIndex = -1;
+                skinPresetNameInput = string.Empty;
+                configuration.LastSkinPresetName = string.Empty;
+                skinPresetStatus = $"Preset \"{removedName}\" deleted.";
+                configuration.Save();
+                return;
+            }
+
+            selectedSkinPresetIndex = Math.Min(
+                selectedSkinPresetIndex,
+                configuration.SkinPresets.Count - 1);
+            var nextPreset = configuration.SkinPresets[selectedSkinPresetIndex];
+            ApplySkinPreset(nextPreset);
+            skinPresetNameInput = nextPreset.Name;
+            configuration.LastSkinPresetName = nextPreset.Name;
+            skinPresetStatus = $"Preset \"{removedName}\" deleted.";
+            configuration.Save();
+
+            if (syncRoomState && !string.IsNullOrWhiteSpace(gameState.RoomCode))
+            {
+                _ = Task.Run(SyncHostStateAsync);
+            }
+        }
+
+        private void SelectSkinPreset(int index, bool syncRoomState)
+        {
+            if (index < 0 || index >= configuration.SkinPresets.Count)
+            {
+                return;
+            }
+
+            selectedSkinPresetIndex = index;
+            var preset = configuration.SkinPresets[index];
+            ApplySkinPreset(preset);
+            skinPresetNameInput = preset.Name;
+            configuration.LastSkinPresetName = preset.Name;
+            skinPresetStatus = $"Loaded preset \"{preset.Name}\".";
+            configuration.Save();
+
+            if (syncRoomState && !string.IsNullOrWhiteSpace(gameState.RoomCode))
+            {
+                _ = Task.Run(SyncHostStateAsync);
+            }
+        }
+
+        private int FindSkinPresetIndex(string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return -1;
+            }
+
+            string normalizedName = NormalizeSkinPresetName(name);
+            for (int i = 0; i < configuration.SkinPresets.Count; i++)
+            {
+                if (string.Equals(
+                    configuration.SkinPresets[i].Name,
+                    normalizedName,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        private SkinPreset CaptureCurrentSkinPreset(string name)
+        {
+            return new SkinPreset
+            {
+                Name = NormalizeSkinPresetName(name),
+                BgColor = ColorToHex(gameState.BgColor),
+                CardColor = ColorToHex(gameState.CardColor),
+                HeaderColor = ColorToHex(gameState.HeaderColor),
+                TextColor = ColorToHex(gameState.TextColor),
+                DaubColor = ColorToHex(gameState.DaubColor),
+                BallColor = ColorToHex(gameState.BallColor),
+            };
+        }
+
+        private void ApplySkinPreset(SkinPreset preset)
+        {
+            gameState.BgColor = ParseHexColor(preset.BgColor, gameState.BgColor);
+            gameState.CardColor = ParseHexColor(preset.CardColor, gameState.CardColor);
+            gameState.HeaderColor = ParseHexColor(preset.HeaderColor, gameState.HeaderColor);
+            gameState.TextColor = ParseHexColor(preset.TextColor, gameState.TextColor);
+            gameState.DaubColor = ParseHexColor(preset.DaubColor, gameState.DaubColor);
+            gameState.BallColor = ParseHexColor(preset.BallColor, gameState.BallColor);
+        }
+
+        private static string NormalizeSkinPresetName(string? value)
+        {
+            return (value ?? string.Empty).Trim();
         }
 
         private string BuildClientUrl(string seed, int count, string letters, string? player)

@@ -5,7 +5,7 @@
   "AssemblyVersion": "1.0.0.6",
   "Description": "Host relay plugin for multi-card bingo sessions.",
   "ApplicableVersion": "any",
-  "DalamudApiLevel": 14,
+  "DalamudApiLevel": 15,
   "LoadRequiredState": 0,
   "LoadSync": false,
   "CanUnloadAsync": false,

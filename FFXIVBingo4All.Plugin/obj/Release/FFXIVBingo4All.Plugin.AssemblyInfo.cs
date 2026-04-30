@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("Host relay plugin for multi-card bingo sessions.")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.6")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ad8e95b2e75ec5599bbe559885edb2e3ce33faeb")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+637e465064b3937a67bb76fc52c462f007f172e3")]
 [assembly: System.Reflection.AssemblyProductAttribute("FFXIVBingo4All")]
 [assembly: System.Reflection.AssemblyTitleAttribute("FFXIVBingo4All")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.6")]
