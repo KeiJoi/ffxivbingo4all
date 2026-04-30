@@ -12,7 +12,7 @@
     <Description>Host relay plugin for multi-card bingo sessions.</Description>
     <ApplicableVersion>any</ApplicableVersion>
     <DalamudApiLevel>15</DalamudApiLevel>
-    <AssemblyVersion>1.0.0.6</AssemblyVersion>
+    <AssemblyVersion>1.0.0.7</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,7 +20,7 @@
     <PackageReference Include="ECommons" Version="3.1.0.5" />
   </ItemGroup>
 
-  <Target Name="CopyPluginZip" AfterTargets="Build">
+  <Target Name="CopyPluginZip" AfterTargets="DefaultDalamudPackagerRelease">
     <PropertyGroup>
       <PluginZipSource>$(OutputPath)$(AssemblyName)\latest.zip</PluginZipSource>
       <PluginZipDest>$(MSBuildProjectDirectory)\..\FFXIVBingo4All.zip</PluginZipDest>
