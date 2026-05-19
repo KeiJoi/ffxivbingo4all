@@ -777,11 +777,15 @@ function createCard(index) {
   const matrix = [];
   grid.forEach((row, rowIndex) => {
     const rowCells = [];
-    row.forEach((value) => {
+    row.forEach((value, colIndex) => {
       const cell = document.createElement("button");
       cell.type = "button";
       cell.className = "cell bingo-cell";
       cell.dataset.card = String(index);
+      cell.dataset.row = String(rowIndex + 1);
+      cell.dataset.col = String(colIndex + 1);
+      cell.dataset.pos = `r${rowIndex + 1}c${colIndex + 1}`;
+      cell.dataset.slot = String((rowIndex * 5) + colIndex + 1).padStart(2, "0");
       if (value === "free") {
         cell.classList.add("free", "daubed");
         cell.dataset.number = "free";

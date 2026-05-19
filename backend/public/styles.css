@@ -26,6 +26,43 @@
   --called-ball-font: clamp(14px, 2.2vmin, 26px);
 }
 
+/* USER CONFIGURATION
+   Position-based daub art:
+   Each card cell now has:
+   - data-pos="r1c1" through data-pos="r5c5"
+   - data-slot="01" through data-slot="25"
+
+   Use these selectors to reveal one image tile per square when that square is daubed.
+   Example:
+
+   .bingo-cell.daubed[data-pos="r1c1"] {
+     color: transparent;
+     background-image: url("./images/blackout/r1c1.png");
+     background-size: cover;
+     background-position: center;
+     background-repeat: no-repeat;
+   }
+
+   The same rule can be written with data-slot instead:
+
+   .bingo-cell.daubed[data-slot="13"] {
+     color: transparent;
+     background-image: url("./images/blackout/slot13.png");
+     background-size: cover;
+     background-position: center;
+     background-repeat: no-repeat;
+   }
+
+   This lets you split one final blackout picture into 25 tiles and assign
+   each tile to a fixed square position, regardless of which number lands there.
+*/
+
+.bingo-cell.daubed[data-pos] {
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
 * {
   box-sizing: border-box;
 }
