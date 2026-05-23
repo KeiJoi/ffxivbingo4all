@@ -12,9 +12,13 @@ const {
 } = require("./server.config");
 
 const app = express();
+const publicDir = path.join(__dirname, "public");
 app.use(cors({ origin: "*" }));
 app.use(express.json());
-app.use(express.static("public"));
+app.use(express.static(publicDir));
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(publicDir, "index.html"));
+});
 
 const server = http.createServer(app);
 const io = new Server(server, {
