@@ -1,12 +1,12 @@
 {
   "version": 2,
-  "dgSpecHash": "LQXE9EsfPiw=",
+  "dgSpecHash": "6sHfgALWTAI=",
   "success": true,
   "projectFilePath": "C:\\FFXIVplugs\\ffxivbingo4all\\FFXIVBingo4All.Plugin\\FFXIVBingo4All.Plugin.csproj",
   "expectedPackageFiles": [
-    "c:\\FFXIVplugs\\ffxivbingo4all\\.dotnet\\.nuget\\packages\\dalamudpackager\\15.0.0\\dalamudpackager.15.0.0.nupkg.sha512",
-    "c:\\FFXIVplugs\\ffxivbingo4all\\.dotnet\\.nuget\\packages\\dotnet.reproduciblebuilds\\1.2.39\\dotnet.reproduciblebuilds.1.2.39.nupkg.sha512",
-    "c:\\FFXIVplugs\\ffxivbingo4all\\.dotnet\\.nuget\\packages\\ecommons\\3.1.0.5\\ecommons.3.1.0.5.nupkg.sha512"
+    "C:\\Users\\kyro_\\.nuget\\packages\\dalamudpackager\\15.0.0\\dalamudpackager.15.0.0.nupkg.sha512",
+    "C:\\Users\\kyro_\\.nuget\\packages\\dotnet.reproduciblebuilds\\1.2.39\\dotnet.reproduciblebuilds.1.2.39.nupkg.sha512",
+    "C:\\Users\\kyro_\\.nuget\\packages\\ecommons\\3.1.0.5\\ecommons.3.1.0.5.nupkg.sha512"
   ],
   "logs": []
 }

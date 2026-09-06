@@ -1,0 +1,12 @@
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\bin\Debug\FFXIVBingo4All.Plugin.json
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\bin\Debug\FFXIVBingo4All.deps.json
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\bin\Debug\FFXIVBingo4All.dll
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\bin\Debug\ECommons.dll
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Debug\FFXIVBingo4All.Plugin.csproj.AssemblyReference.cache
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Debug\FFXIVBingo4All.Plugin.GeneratedMSBuildEditorConfig.editorconfig
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Debug\FFXIVBingo4All.Plugin.AssemblyInfoInputs.cache
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Debug\FFXIVBingo4All.Plugin.AssemblyInfo.cs
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Debug\FFXIVBingo4All.Plugin.csproj.CoreCompileInputs.cache
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Debug\FFXIVBingo4All.Plugin.sourcelink.json
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Debug\FFXIVBin.B18E71B2.Up2Date
+C:\FFXIVplugs\ffxivbingo4all\FFXIVBingo4All.Plugin\obj\Debug\FFXIVBingo4All.dll
