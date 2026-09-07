@@ -3,6 +3,7 @@ const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
 const path = require("path");
+const crypto = require("crypto");
 const sqlite3 = require("sqlite3").verbose();
 const { adminKey } = require("./admin.config");
 const {
@@ -10,6 +11,7 @@ const {
   roomRetentionDays = 30,
   cleanupIntervalMinutes = 60,
 } = require("./server.config");
+const cardgen = require("./lib/cardgen");
 
 const app = express();
 const publicDir = path.join(__dirname, "public");
@@ -42,6 +44,40 @@ db.serialize(() => {
       room_code TEXT PRIMARY KEY,
       room_key TEXT NOT NULL,
       state TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`
+  );
+  // --- Additive v2 tables (docs/BINGO_V2_PROTOCOL.md). Legacy tables/columns above are untouched. ---
+  db.run(
+    `CREATE TABLE IF NOT EXISTS idempotency_keys (
+      key TEXT PRIMARY KEY,
+      room_code TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      response_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`
+  );
+  db.run(
+    `CREATE TABLE IF NOT EXISTS payout_obligations (
+      payout_id TEXT PRIMARY KEY,
+      room_code TEXT NOT NULL,
+      winner_seed TEXT NOT NULL,
+      winner_name TEXT NOT NULL,
+      total_owed INTEGER NOT NULL,
+      confirmed_paid INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`
+  );
+  db.run(
+    `CREATE TABLE IF NOT EXISTS payout_attempts (
+      attempt_id TEXT PRIMARY KEY,
+      payout_id TEXT NOT NULL,
+      amount INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      note TEXT,
+      created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     )`
   );
@@ -120,6 +156,55 @@ function scheduleRoomCleanup() {
 
 function touchSession(session) {
   session.updatedAt = Date.now();
+}
+
+// --- v2 idempotency helper (docs/BINGO_V2_PROTOCOL.md §2) ---------------------------------
+// Wraps a v2 mutating handler: if `idempotencyKey` has already been used for this endpoint,
+// the previously-computed {status, body} is replayed verbatim instead of re-running `run`.
+// This is what makes a retried/duplicated request (network retry, double-click, two hosts
+// racing) safe by construction rather than by relying on client discipline.
+async function withIdempotency(req, res, endpoint, roomCode, run) {
+  const idempotencyKey =
+    typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey.trim() : "";
+  if (!idempotencyKey) {
+    return res.status(400).json({ error: "idempotencyKey required" });
+  }
+
+  const existing = await dbGet(
+    "SELECT response_json FROM idempotency_keys WHERE key = ? AND endpoint = ?",
+    [idempotencyKey, endpoint]
+  );
+  if (existing) {
+    try {
+      const replay = JSON.parse(existing.response_json);
+      return res.status(replay.status).json(replay.body);
+    } catch (err) {
+      console.error("idempotency_replay_parse_failed", err);
+    }
+  }
+
+  const result = await run();
+  try {
+    await dbRun(
+      "INSERT INTO idempotency_keys (key, room_code, endpoint, response_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      [
+        idempotencyKey,
+        roomCode,
+        endpoint,
+        JSON.stringify({ status: result.status, body: result.body }),
+        Date.now(),
+      ]
+    );
+  } catch (err) {
+    // Two racing requests with the same key can both reach here; the loser's INSERT fails on
+    // the PRIMARY KEY — that's fine, the winner's row is what future replays will read.
+    console.error("idempotency_store_failed", err);
+  }
+  return res.status(result.status).json(result.body);
+}
+
+function newId() {
+  return crypto.randomUUID();
 }
 
 const PROGRESSIVE_GAME_TYPE = "Progressive Bingo";
@@ -269,6 +354,54 @@ function getRoomRuleGameType(state) {
     : "Single Line";
 }
 
+// --- Paid vs. complimentary cards (docs/BINGO_V2_PROTOCOL.md §3) --------------------------
+// `count` is preserved as a computed mirror of paidCount+compCount so every legacy reader
+// (which only ever looks at `count`) keeps seeing the correct total card count.
+function normalizePlayerRecord(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const hasExplicitPaidComp =
+    Number.isFinite(Number(value.paidCount)) || Number.isFinite(Number(value.compCount));
+
+  let paidCount;
+  let compCount;
+  if (hasExplicitPaidComp) {
+    paidCount = Math.max(0, Math.floor(Number(value.paidCount) || 0));
+    compCount = Math.max(0, Math.floor(Number(value.compCount) || 0));
+  } else {
+    const count = Number(value.count);
+    if (!Number.isInteger(count) || count < 1) {
+      return null;
+    }
+    paidCount = Math.min(count, 16);
+    compCount = 0;
+  }
+
+  if (paidCount + compCount > 16) {
+    // Comp cards are reduced first to fit the 1-16 cap — paid cards represent money already
+    // collected and are never silently trimmed by a cap violation.
+    compCount = Math.max(0, 16 - paidCount);
+  }
+  if (paidCount + compCount < 1) {
+    return null;
+  }
+
+  return {
+    name:
+      typeof value.name === "string" && value.name.trim().length > 0
+        ? value.name.trim()
+        : "Guest",
+    shortCode: typeof value.shortCode === "string" ? value.shortCode.trim() : "",
+    paidCount,
+    compCount,
+    count: paidCount + compCount,
+  };
+}
+
+// Normalizes a raw players map with no reference to prior state — used when loading a room's
+// already-persisted `players` (every stored record was already merged correctly when written)
+// and as a building block inside mergePlayers below.
 function normalizePlayers(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return {};
@@ -278,24 +411,82 @@ function normalizePlayers(raw) {
     if (typeof seed !== "string" || !seed.trim()) {
       return;
     }
-    if (!value || typeof value !== "object") {
-      return;
+    const record = normalizePlayerRecord(value);
+    if (record) {
+      normalized[seed.trim()] = record;
     }
-    const count = Number(value.count);
-    if (!Number.isInteger(count) || count < 1) {
-      return;
-    }
-    normalized[seed.trim()] = {
-      name:
-        typeof value.name === "string" && value.name.trim().length > 0
-          ? value.name.trim()
-          : "Guest",
-      count: Math.min(count, 16),
-      shortCode:
-        typeof value.shortCode === "string" ? value.shortCode.trim() : "",
-    };
   });
   return normalized;
+}
+
+// Merges an incoming players write (from legacy host-sync OR the new v2 card-grant endpoint)
+// into the existing stored players map. A legacy-shaped incoming entry (bare `count`, which is
+// all the standalone plugin ever sends) preserves the seed's existing compCount and attributes
+// the entire count delta to paidCount, so a comp-card grant survives being re-synced by a
+// client that doesn't know comp cards exist. An incoming entry that explicitly carries
+// paidCount/compCount (only ever sent by the v2 card-grant endpoint) is trusted directly.
+function mergePlayers(existingPlayers, incomingRaw) {
+  if (!incomingRaw || typeof incomingRaw !== "object" || Array.isArray(incomingRaw)) {
+    return {};
+  }
+  const merged = {};
+  Object.entries(incomingRaw).forEach(([rawSeed, value]) => {
+    if (typeof rawSeed !== "string" || !rawSeed.trim()) {
+      return;
+    }
+    const seed = rawSeed.trim();
+    const record = normalizePlayerRecord(value);
+    if (!record) {
+      return;
+    }
+
+    const explicitPaidComp =
+      value && typeof value === "object" &&
+      (Number.isFinite(Number(value.paidCount)) || Number.isFinite(Number(value.compCount)));
+    const existing = existingPlayers ? existingPlayers[seed] : null;
+
+    if (explicitPaidComp || !existing) {
+      merged[seed] = record;
+      return;
+    }
+
+    const newTotal = record.count;
+    const preservedComp = Math.min(existing.compCount || 0, newTotal);
+    merged[seed] = {
+      name: record.name,
+      shortCode: record.shortCode,
+      paidCount: newTotal - preservedComp,
+      compCount: preservedComp,
+      count: newTotal,
+    };
+  });
+  return merged;
+}
+
+// paidCards/compCards/currentPot/prizePool are always derived fresh from the authoritative
+// players map — clients display this object, they never invent an independent total
+// (docs/BINGO_V2_PROTOCOL.md §4). Complimentary cards never appear in currentPot/prizePool.
+function computePot(session) {
+  let paidCards = 0;
+  let compCards = 0;
+  Object.values(session.players || {}).forEach((player) => {
+    paidCards += Number(player.paidCount) || 0;
+    compCards += Number(player.compCount) || 0;
+  });
+  const currentPot = session.startingPot + paidCards * session.costPerCard;
+  const prizePool = Math.round(currentPot * (session.prizePercentage / 100));
+  return {
+    paidCards,
+    compCards,
+    totalCards: paidCards + compCards,
+    currentPot,
+    prizePool,
+  };
+}
+
+const LIFECYCLE_STATES = new Set(["Legacy", "Draft", "Active", "Closed"]);
+function normalizeLifecycle(value) {
+  return typeof value === "string" && LIFECYCLE_STATES.has(value) ? value : "Legacy";
 }
 
 function buildAllowedCards(players, allowedCards) {
@@ -385,6 +576,7 @@ function defaultRoomState() {
       daub: "33D17A",
       ball: "F3F3F3",
     },
+    lifecycle: "Legacy",
     updatedAt: Date.now(),
   };
 }
@@ -448,6 +640,8 @@ function normalizeRoomState(raw) {
       ball: normalizeHex(state.colors.ball) || defaults.colors.ball,
     };
   }
+
+  state.lifecycle = normalizeLifecycle(state.lifecycle);
 
   state.updatedAt = Number.isFinite(state.updatedAt)
     ? state.updatedAt
@@ -641,10 +835,35 @@ app.post("/api/host-sync", async (req, res) => {
     session = defaultRoomState();
   }
 
+  // Economics lock (docs/BINGO_V2_PROTOCOL.md §5): only a room created via POST /api/v2/rooms
+  // and then explicitly started can ever be locked, so this can never reject the standalone
+  // plugin's own rooms. Even for a locked room, resending the SAME value (which is what the
+  // plugin always does — it re-pushes its full local state every sync) is a no-op, not a
+  // rejection; only a genuine attempted change is rejected, and the whole request is rejected
+  // atomically rather than partially applied.
+  if (session.lifecycle === "Active") {
+    const nextCost = Number.isFinite(costPerCard)
+      ? Math.max(0, Math.floor(Number(costPerCard)))
+      : session.costPerCard;
+    const nextStarting = Number.isFinite(startingPot)
+      ? Math.max(0, Math.floor(Number(startingPot)))
+      : session.startingPot;
+    const nextPercentage = Number.isFinite(prizePercentage)
+      ? Math.min(Math.max(Number(prizePercentage), 0), 100)
+      : session.prizePercentage;
+    if (
+      nextCost !== session.costPerCard ||
+      nextStarting !== session.startingPot ||
+      nextPercentage !== session.prizePercentage
+    ) {
+      return res.status(409).json({ error: "economics_locked" });
+    }
+  }
+
   session.calledNumbers = Array.isArray(calledNumbers)
     ? calledNumbers.filter((value) => Number.isInteger(value))
     : session.calledNumbers;
-  session.players = normalizePlayers(players);
+  session.players = mergePlayers(session.players, players);
   session.allowedCards = buildAllowedCards(session.players, allowedCards);
   if (clearBingoState) {
     session.lastBingo = null;
@@ -694,6 +913,7 @@ app.post("/api/host-sync", async (req, res) => {
   await saveRoom(roomCode, roomKey, session);
 
   const allowedSeeds = getAllowedSeeds(session);
+  const pot = computePot(session);
   io.to(roomCode).emit("room_state", {
     roomCode,
     allowedCards: session.allowedCards,
@@ -707,6 +927,9 @@ app.post("/api/host-sync", async (req, res) => {
     letters: session.letters,
     title: session.title,
     colors: session.colors,
+    // Additive (docs/BINGO_V2_PROTOCOL.md §4-5) — the legacy browser client ignores unknown fields.
+    pot,
+    lifecycle: session.lifecycle,
   });
 
   console.log("host_sync_updated", {
@@ -729,6 +952,10 @@ app.post("/api/host-sync", async (req, res) => {
     letters: session.letters,
     title: session.title,
     colors: session.colors,
+    // Additive (docs/BINGO_V2_PROTOCOL.md §4-5) — old plugin/browser deserializers ignore unknown fields.
+    players: session.players,
+    pot,
+    lifecycle: session.lifecycle,
   });
 });
 
@@ -865,6 +1092,9 @@ app.get("/api/room-state", async (req, res) => {
     letters: session.letters,
     title: session.title,
     colors: session.colors,
+    // Additive (docs/BINGO_V2_PROTOCOL.md §4-5).
+    pot: computePot(session),
+    lifecycle: session.lifecycle,
   });
 });
 
@@ -982,11 +1212,19 @@ app.get("/l/:code", async (req, res) => {
 });
 
 app.post("/api/call-number", async (req, res) => {
-  const { roomCode, number } = req.body || {};
+  const { roomCode, number: rawNumber } = req.body || {};
   console.log("api_call_number", req.body);
 
   if (!roomCode) {
     return res.status(400).json({ error: "roomCode required" });
+  }
+
+  // Hardening only (docs/BINGO_V2_PROTOCOL.md §1): a legitimate caller always sends an
+  // in-range integer already — this newly rejects only a malformed/malicious call that used to
+  // be silently accepted into calledNumbers and filtered out on the *next* load instead.
+  const parsedNumber = Number(rawNumber);
+  if (!Number.isInteger(parsedNumber) || parsedNumber < 1 || parsedNumber > 75) {
+    return res.status(400).json({ error: "number must be an integer from 1 to 75" });
   }
 
   const session = await loadRoom(roomCode);
@@ -994,6 +1232,7 @@ app.post("/api/call-number", async (req, res) => {
     return res.status(404).json({ error: "room_not_found" });
   }
 
+  const number = parsedNumber;
   const alreadyCalled = session.calledNumbers.includes(number);
   if (!alreadyCalled) {
     session.calledNumbers.push(number);
@@ -1014,6 +1253,481 @@ app.post("/api/call-number", async (req, res) => {
     added: !alreadyCalled,
     calledNumbers: session.calledNumbers,
   });
+});
+
+// =====================================================================================
+// v2 — additive, VenueOS-facing endpoints. See docs/BINGO_V2_PROTOCOL.md for the full
+// design rationale. None of these are called by the standalone plugin/browser client, and
+// none of them change any legacy route/table/response shape above this line.
+// =====================================================================================
+
+async function buildRoomSnapshot(roomCode) {
+  const session = await loadRoom(roomCode);
+  if (!session) {
+    return null;
+  }
+  const obligations = await dbAll(
+    "SELECT * FROM payout_obligations WHERE room_code = ? ORDER BY created_at ASC",
+    [roomCode]
+  );
+  const payouts = [];
+  for (const obligation of obligations) {
+    const attempts = await dbAll(
+      "SELECT * FROM payout_attempts WHERE payout_id = ? ORDER BY created_at ASC",
+      [obligation.payout_id]
+    );
+    payouts.push({
+      payoutId: obligation.payout_id,
+      winnerSeed: obligation.winner_seed,
+      winnerName: obligation.winner_name,
+      totalOwed: obligation.total_owed,
+      confirmedPaid: obligation.confirmed_paid,
+      outstanding: Math.max(0, obligation.total_owed - obligation.confirmed_paid),
+      status: obligation.status,
+      attempts: attempts.map((attempt) => ({
+        attemptId: attempt.attempt_id,
+        amount: attempt.amount,
+        status: attempt.status,
+        note: attempt.note || null,
+        createdAt: attempt.created_at,
+        updatedAt: attempt.updated_at,
+      })),
+    });
+  }
+
+  return {
+    ok: true,
+    roomCode,
+    lifecycle: session.lifecycle,
+    calledNumbers: session.calledNumbers,
+    allowedSeeds: Object.keys(session.allowedCards),
+    allowedCards: session.allowedCards,
+    players: session.players,
+    daubs: session.daubs,
+    lastBingo: session.lastBingo,
+    bingoCalls: Array.isArray(session.bingoCalls) ? session.bingoCalls : [],
+    costPerCard: session.costPerCard,
+    startingPot: session.startingPot,
+    prizePercentage: session.prizePercentage,
+    gameType: getRoomRuleGameType(session),
+    gameTypeBase: session.gameType,
+    displayGameType: getRoomGameTypeLabel(session),
+    progressive: session.progressive,
+    letters: session.letters,
+    title: session.title,
+    colors: session.colors,
+    pot: computePot(session),
+    payouts,
+  };
+}
+
+// POST /api/v2/rooms — create a room with a full settings snapshot. Starts in "Draft":
+// economics remain mutable until an explicit /start call locks them.
+app.post("/api/v2/rooms", async (req, res) => {
+  const {
+    roomCode,
+    roomKey,
+    venueName,
+    costPerCard,
+    startingPot,
+    prizePercentage,
+    gameType,
+    progressive,
+    letters,
+    title,
+    bg,
+    card,
+    header,
+    text,
+    daub,
+    ball,
+  } = req.body || {};
+
+  if (typeof roomCode !== "string" || !roomCode.trim()) {
+    return res.status(400).json({ error: "roomCode required" });
+  }
+  if (typeof roomKey !== "string" || !roomKey.trim()) {
+    return res.status(400).json({ error: "roomKey required" });
+  }
+
+  const existing = await loadRoom(roomCode);
+  if (existing) {
+    return res.status(409).json({ error: "room_already_exists" });
+  }
+
+  const session = defaultRoomState();
+  session.lifecycle = "Draft";
+  if (typeof gameType === "string" && gameType.trim()) {
+    session.gameType = gameType.trim();
+  }
+  session.progressive = normalizeProgressiveState(progressive, session.gameType);
+  if (Number.isFinite(costPerCard)) {
+    session.costPerCard = Math.max(0, Math.floor(Number(costPerCard)));
+  }
+  if (Number.isFinite(startingPot)) {
+    session.startingPot = Math.max(0, Math.floor(Number(startingPot)));
+  }
+  if (Number.isFinite(prizePercentage)) {
+    session.prizePercentage = Math.min(Math.max(Number(prizePercentage), 0), 100);
+  }
+  if (typeof letters === "string") {
+    const normalizedLetters = normalizeLetters(letters);
+    if (normalizedLetters) session.letters = normalizedLetters;
+  }
+  // Venue/Event: transmitted by VenueOS from the active Venue Profile name, persisted here
+  // exactly like the legacy `title` field — never a Bingo-local venue-name setting.
+  session.title = typeof title === "string" && title.trim() ? title.trim() : (typeof venueName === "string" ? venueName.trim() : session.title);
+  session.colors = {
+    bg: normalizeHex(bg) || session.colors.bg,
+    card: normalizeHex(card) || session.colors.card,
+    header: normalizeHex(header) || session.colors.header,
+    text: normalizeHex(text) || session.colors.text,
+    daub: normalizeHex(daub) || session.colors.daub,
+    ball: normalizeHex(ball) || session.colors.ball,
+  };
+
+  touchSession(session);
+  await saveRoom(roomCode, roomKey.trim(), session);
+  const snapshot = await buildRoomSnapshot(roomCode);
+  return res.status(201).json(snapshot);
+});
+
+// POST /api/v2/rooms/:roomCode/start — Draft -> Active. Idempotent.
+app.post("/api/v2/rooms/:roomCode/start", async (req, res) => {
+  const { roomCode } = req.params;
+  const roomKey = getRoomKey(req);
+  if (!roomKey) return res.status(400).json({ error: "roomKey required" });
+
+  const session = await loadRoom(roomCode);
+  if (!session || session.roomKey !== roomKey) {
+    return res.status(404).json({ error: "room not found" });
+  }
+  if (session.lifecycle === "Draft") {
+    session.lifecycle = "Active";
+    touchSession(session);
+    await saveRoom(roomCode, roomKey, session);
+  } else if (session.lifecycle === "Legacy") {
+    return res.status(409).json({ error: "legacy_room_cannot_be_locked" });
+  }
+  const snapshot = await buildRoomSnapshot(roomCode);
+  return res.json(snapshot);
+});
+
+// POST /api/v2/rooms/:roomCode/close — soft-close (Closed), does not delete the row.
+app.post("/api/v2/rooms/:roomCode/close", async (req, res) => {
+  const { roomCode } = req.params;
+  const roomKey = getRoomKey(req);
+  if (!roomKey) return res.status(400).json({ error: "roomKey required" });
+
+  const session = await loadRoom(roomCode);
+  if (!session || session.roomKey !== roomKey) {
+    return res.status(404).json({ error: "room not found" });
+  }
+  session.lifecycle = "Closed";
+  touchSession(session);
+  await saveRoom(roomCode, roomKey, session);
+  const snapshot = await buildRoomSnapshot(roomCode);
+  return res.json(snapshot);
+});
+
+// GET /api/v2/rooms/:roomCode — full authoritative snapshot, including the payout ledger.
+// This is what a second host reads to resume after a crash/handoff.
+app.get("/api/v2/rooms/:roomCode", async (req, res) => {
+  const snapshot = await buildRoomSnapshot(req.params.roomCode);
+  if (!snapshot) {
+    return res.status(404).json({ error: "room_not_found" });
+  }
+  return res.json(snapshot);
+});
+
+// POST /api/v2/rooms/:roomCode/cards — grant/set a seed's paid/comp card counts.
+app.post("/api/v2/rooms/:roomCode/cards", async (req, res) => {
+  const { roomCode } = req.params;
+  const roomKey = getRoomKey(req);
+  if (!roomKey) return res.status(400).json({ error: "roomKey required" });
+
+  const { seed, name, shortCode, paidCount, compCount } = req.body || {};
+  if (typeof seed !== "string" || !seed.trim()) {
+    return res.status(400).json({ error: "seed required" });
+  }
+
+  return withIdempotency(req, res, "cards", roomCode, async () => {
+    const session = await loadRoom(roomCode);
+    if (!session || session.roomKey !== roomKey) {
+      return { status: 404, body: { error: "room not found" } };
+    }
+    if (session.lifecycle === "Closed") {
+      return { status: 409, body: { error: "room_closed" } };
+    }
+
+    const incoming = {
+      [seed.trim()]: {
+        name,
+        shortCode,
+        paidCount: Number.isFinite(Number(paidCount)) ? Number(paidCount) : undefined,
+        compCount: Number.isFinite(Number(compCount)) ? Number(compCount) : undefined,
+      },
+    };
+    session.players = mergePlayers(session.players, incoming);
+    // An explicit v2 grant always carries paidCount/compCount, so mergePlayers already trusted
+    // it directly rather than applying the legacy delta-preservation rule.
+    session.allowedCards = buildAllowedCards(session.players, session.allowedCards);
+    touchSession(session);
+    await saveRoom(roomCode, roomKey, session);
+
+    io.to(roomCode).emit("room_state", {
+      roomCode,
+      allowedCards: session.allowedCards,
+      costPerCard: session.costPerCard,
+      startingPot: session.startingPot,
+      prizePercentage: session.prizePercentage,
+      gameType: getRoomRuleGameType(session),
+      gameTypeBase: session.gameType,
+      displayGameType: getRoomGameTypeLabel(session),
+      progressive: session.progressive,
+      letters: session.letters,
+      title: session.title,
+      colors: session.colors,
+      pot: computePot(session),
+      lifecycle: session.lifecycle,
+    });
+
+    const snapshot = await buildRoomSnapshot(roomCode);
+    return { status: 200, body: snapshot };
+  });
+});
+
+// POST /api/v2/rooms/:roomCode/payouts — create (or return the existing open) obligation.
+app.post("/api/v2/rooms/:roomCode/payouts", async (req, res) => {
+  const { roomCode } = req.params;
+  const roomKey = getRoomKey(req);
+  if (!roomKey) return res.status(400).json({ error: "roomKey required" });
+
+  const { winnerSeed, winnerName, totalOwed } = req.body || {};
+  const owed = Number(totalOwed);
+  if (typeof winnerSeed !== "string" || !winnerSeed.trim()) {
+    return res.status(400).json({ error: "winnerSeed required" });
+  }
+  if (!Number.isInteger(owed) || owed < 1) {
+    return res.status(400).json({ error: "totalOwed must be a positive integer" });
+  }
+
+  return withIdempotency(req, res, "payouts", roomCode, async () => {
+    const session = await loadRoom(roomCode);
+    if (!session || session.roomKey !== roomKey) {
+      return { status: 404, body: { error: "room not found" } };
+    }
+
+    const existingOpen = await dbGet(
+      "SELECT * FROM payout_obligations WHERE room_code = ? AND winner_seed = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+      [roomCode, winnerSeed.trim()]
+    );
+    if (existingOpen) {
+      return {
+        status: 200,
+        body: {
+          payoutId: existingOpen.payout_id,
+          winnerSeed: existingOpen.winner_seed,
+          winnerName: existingOpen.winner_name,
+          totalOwed: existingOpen.total_owed,
+          confirmedPaid: existingOpen.confirmed_paid,
+          outstanding: Math.max(0, existingOpen.total_owed - existingOpen.confirmed_paid),
+          status: existingOpen.status,
+        },
+      };
+    }
+
+    const payoutId = newId();
+    const now = Date.now();
+    const name = typeof winnerName === "string" && winnerName.trim() ? winnerName.trim() : "Unknown";
+    await dbRun(
+      "INSERT INTO payout_obligations (payout_id, room_code, winner_seed, winner_name, total_owed, confirmed_paid, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 'open', ?, ?)",
+      [payoutId, roomCode, winnerSeed.trim(), name, owed, now, now]
+    );
+    return {
+      status: 201,
+      body: {
+        payoutId,
+        winnerSeed: winnerSeed.trim(),
+        winnerName: name,
+        totalOwed: owed,
+        confirmedPaid: 0,
+        outstanding: owed,
+        status: "open",
+      },
+    };
+  });
+});
+
+// POST /api/v2/rooms/:roomCode/payouts/:payoutId/attempts — start a new attempt (chunk).
+app.post("/api/v2/rooms/:roomCode/payouts/:payoutId/attempts", async (req, res) => {
+  const { roomCode, payoutId } = req.params;
+  const roomKey = getRoomKey(req);
+  if (!roomKey) return res.status(400).json({ error: "roomKey required" });
+
+  const amount = Number(req.body?.amount);
+  if (!Number.isInteger(amount) || amount < 1) {
+    return res.status(400).json({ error: "amount must be a positive integer" });
+  }
+
+  return withIdempotency(req, res, "payout_attempt_create", roomCode, async () => {
+    const session = await loadRoom(roomCode);
+    if (!session || session.roomKey !== roomKey) {
+      return { status: 404, body: { error: "room not found" } };
+    }
+    const obligation = await dbGet(
+      "SELECT * FROM payout_obligations WHERE payout_id = ? AND room_code = ?",
+      [payoutId, roomCode]
+    );
+    if (!obligation) {
+      return { status: 404, body: { error: "payout not found" } };
+    }
+    if (obligation.status !== "open") {
+      return { status: 409, body: { error: "obligation_not_open" } };
+    }
+    const outstanding = obligation.total_owed - obligation.confirmed_paid;
+    if (amount > outstanding) {
+      return { status: 409, body: { error: "amount_exceeds_outstanding", outstanding } };
+    }
+
+    const attemptId = newId();
+    const now = Date.now();
+    await dbRun(
+      "INSERT INTO payout_attempts (attempt_id, payout_id, amount, status, note, created_at, updated_at) VALUES (?, ?, ?, 'pending', NULL, ?, ?)",
+      [attemptId, payoutId, amount, now, now]
+    );
+    return { status: 201, body: { attemptId, payoutId, amount, status: "pending" } };
+  });
+});
+
+// PATCH /api/v2/rooms/:roomCode/payouts/:payoutId/attempts/:attemptId — transition an attempt.
+// Confirming is the only transition that changes confirmed_paid, applied via a guarded UPDATE
+// (WHERE status='pending') so a duplicate/retried confirm can never double-apply — see
+// docs/BINGO_V2_PROTOCOL.md §7 ("a completed attempt must never be applied twice").
+app.patch("/api/v2/rooms/:roomCode/payouts/:payoutId/attempts/:attemptId", async (req, res) => {
+  const { roomCode, payoutId, attemptId } = req.params;
+  const roomKey = getRoomKey(req);
+  if (!roomKey) return res.status(400).json({ error: "roomKey required" });
+
+  const status = req.body?.status;
+  const validStatuses = new Set(["confirmed", "failed", "canceled", "ambiguous"]);
+  if (!validStatuses.has(status)) {
+    return res.status(400).json({ error: "status must be one of confirmed|failed|canceled|ambiguous" });
+  }
+  const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 500) : null;
+
+  return withIdempotency(req, res, "payout_attempt_transition", roomCode, async () => {
+    const session = await loadRoom(roomCode);
+    if (!session || session.roomKey !== roomKey) {
+      return { status: 404, body: { error: "room not found" } };
+    }
+    const attempt = await dbGet(
+      "SELECT * FROM payout_attempts WHERE attempt_id = ? AND payout_id = ?",
+      [attemptId, payoutId]
+    );
+    if (!attempt) {
+      return { status: 404, body: { error: "attempt not found" } };
+    }
+
+    const now = Date.now();
+    if (status === "confirmed") {
+      const guarded = await dbRun(
+        "UPDATE payout_attempts SET status = 'confirmed', note = ?, updated_at = ? WHERE attempt_id = ? AND status = 'pending'",
+        [note, now, attemptId]
+      );
+      if (guarded.changes > 0) {
+        await dbRun(
+          "UPDATE payout_obligations SET confirmed_paid = confirmed_paid + ?, updated_at = ? WHERE payout_id = ?",
+          [attempt.amount, now, payoutId]
+        );
+        const obligation = await dbGet("SELECT * FROM payout_obligations WHERE payout_id = ?", [payoutId]);
+        if (obligation && obligation.confirmed_paid >= obligation.total_owed) {
+          await dbRun("UPDATE payout_obligations SET status = 'paid', updated_at = ? WHERE payout_id = ?", [now, payoutId]);
+        }
+      }
+      // If guarded.changes === 0, this attempt was already confirmed by an earlier request
+      // (or is in a terminal non-pending state) — confirmed_paid is intentionally NOT touched
+      // again; we just report the current, already-correct state below.
+    } else if (attempt.status === "pending") {
+      await dbRun("UPDATE payout_attempts SET status = ?, note = ?, updated_at = ? WHERE attempt_id = ?", [status, note, now, attemptId]);
+    }
+
+    const finalAttempt = await dbGet("SELECT * FROM payout_attempts WHERE attempt_id = ?", [attemptId]);
+    const finalObligation = await dbGet("SELECT * FROM payout_obligations WHERE payout_id = ?", [payoutId]);
+    return {
+      status: 200,
+      body: {
+        attemptId: finalAttempt.attempt_id,
+        status: finalAttempt.status,
+        note: finalAttempt.note || null,
+        obligation: {
+          payoutId: finalObligation.payout_id,
+          totalOwed: finalObligation.total_owed,
+          confirmedPaid: finalObligation.confirmed_paid,
+          outstanding: Math.max(0, finalObligation.total_owed - finalObligation.confirmed_paid),
+          status: finalObligation.status,
+        },
+      },
+    };
+  });
+});
+
+// POST /api/v2/rooms/:roomCode/claims — validated bingo claim path (docs/BINGO_V2_PROTOCOL.md
+// §7). The legacy call_bingo Socket.IO handler is untouched and remains fully permissive.
+app.post("/api/v2/rooms/:roomCode/claims", async (req, res) => {
+  const { roomCode } = req.params;
+  const { seed, cardIndex, name } = req.body || {};
+
+  if (typeof seed !== "string" || !seed.trim()) {
+    return res.status(400).json({ ok: false, validated: false, reason: "seed required" });
+  }
+  const index = Number(cardIndex);
+  if (!Number.isInteger(index) || index < 0) {
+    return res.status(400).json({ ok: false, validated: false, reason: "cardIndex required" });
+  }
+
+  const session = await loadRoom(roomCode);
+  if (!session) {
+    return res.status(404).json({ ok: false, validated: false, reason: "room_not_found" });
+  }
+
+  const allowedSeeds = getAllowedSeeds(session);
+  if (allowedSeeds.length > 0 && !allowedSeeds.includes(seed.trim())) {
+    return res.status(400).json({ ok: false, validated: false, reason: "invalid_seed" });
+  }
+  const allowedCount = session.allowedCards[seed.trim()] || 0;
+  if (index >= allowedCount) {
+    return res.status(400).json({ ok: false, validated: false, reason: "invalid_card_index" });
+  }
+
+  const grid = cardgen.generateCardForIndex(seed.trim(), index);
+  const cardNums = cardgen.cardNumbers(grid);
+  const daubed = session.daubs?.[seed.trim()]?.[String(index)] || session.daubs?.[seed.trim()]?.[index] || [];
+  const daubedSet = new Set(daubed);
+
+  const everyDaubWasCalled = daubed.every((n) => session.calledNumbers.includes(n));
+  const everyDaubOnCard = daubed.every((n) => cardNums.includes(n));
+  if (!everyDaubWasCalled || !everyDaubOnCard) {
+    return res.status(400).json({ ok: false, validated: false, reason: "daub_state_invalid" });
+  }
+
+  const ruleType = getRoomRuleGameType(session);
+  const hasBingo = cardgen.cardHasBingo(grid, daubedSet, ruleType);
+  if (!hasBingo) {
+    return res.status(400).json({ ok: false, validated: false, reason: "pattern_not_satisfied" });
+  }
+
+  const caller = typeof name === "string" && name.trim() ? name.trim().slice(0, 32) : "Unknown";
+  const phase = session.progressive && session.progressive.enabled ? session.progressive.currentPhase : null;
+  session.lastBingo = { name: caller, seed: seed.trim(), phase, timestamp: Date.now() };
+  if (!Array.isArray(session.bingoCalls)) session.bingoCalls = [];
+  session.bingoCalls.push({ name: caller, seed: seed.trim(), phase, timestamp: Date.now(), validated: true, cardIndex: index });
+  touchSession(session);
+  await saveRoom(roomCode, session.roomKey, session);
+
+  io.to(roomCode).emit("bingo_called", { roomCode, name: caller, seed: seed.trim(), phase, timestamp: Date.now() });
+
+  return res.json({ ok: true, validated: true, pattern: ruleType });
 });
 
 io.on("connection", (socket) => {
@@ -1213,6 +1927,18 @@ io.on("connection", (socket) => {
       touchSession(session);
       await saveRoom(roomCode, session.roomKey, session);
     }
+
+    // Additive acknowledgment (docs/BINGO_V2_PROTOCOL.md §"Authoritative daub state" in the
+    // reconstruction brief): the legacy client never listened for this and is unaffected, but a
+    // client that does can reconcile its optimistic local toggle against the backend's actual
+    // persisted array for this card instead of trusting its own DOM state — sent unconditionally
+    // (even on a no-op) so a reconnect-time replay of a queued mutation gets a fresh ack too.
+    socket.emit("daub_state", {
+      roomCode,
+      seed,
+      cardIndex: card,
+      numbers: session.daubs[seed][card],
+    });
   });
 
   socket.on("disconnect", (reason) => {

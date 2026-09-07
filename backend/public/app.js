@@ -602,37 +602,84 @@ function setDaubed(cell, next) {
   cell.setAttribute("aria-pressed", String(next));
 }
 
+// Outstanding local daub intentions that have not yet been acknowledged by the backend
+// (either never sent because the socket was disconnected, or sent but no `daub_state` ack has
+// come back yet). Keyed by "{cardIndex}:{number}" -> desired daubed state. This is what lets a
+// daub made while offline survive instead of being silently dropped, and what lets a reconnect
+// distinguish "the server's last-known state" from "what I clicked locally that hasn't landed
+// yet" rather than either losing the click or stomping it with stale server data.
+const pendingDaubOps = new Map();
+
+// Authoritative rebuild — NOT a merge. Every rendered, non-free cell is set to exactly what the
+// backend reports for it, except a cell with a still-unacknowledged local intention (see
+// pendingDaubOps above), which keeps showing that intention until it is confirmed or superseded.
+// This is what makes a page refresh/reconnect discard stale local daub assumptions and rebuild
+// from the backend instead of only ever adding to whatever was already in the DOM.
 function applyDaubs(seed, daubs) {
-  if (!seed || !daubs || typeof daubs !== "object") {
+  if (!seed) {
     return;
   }
-  const cardMap = daubs[seed];
-  if (!cardMap || typeof cardMap !== "object") {
-    return;
-  }
-  Object.keys(cardMap).forEach((cardIndex) => {
-    const numbers = cardMap[cardIndex];
-    if (!Array.isArray(numbers)) {
+  const cardMap = daubs && typeof daubs === "object" ? daubs[seed] : null;
+  const authoritative = cardMap && typeof cardMap === "object" ? cardMap : {};
+  document.querySelectorAll(".bingo-cell[data-card]").forEach((cell) => {
+    if (cell.dataset.number === "free") {
       return;
     }
-    numbers.forEach((value) => {
-      const selector = `[data-card="${cardIndex}"][data-number="${value}"]`;
-      document.querySelectorAll(selector).forEach((cell) => {
-        setDaubed(cell, true);
-      });
-    });
+    const cardIndex = cell.dataset.card;
+    const opKey = `${cardIndex}:${cell.dataset.number}`;
+    const numbers = Array.isArray(authoritative[cardIndex]) ? authoritative[cardIndex] : [];
+    const serverState = numbers.some(
+      (value) => String(value) === String(cell.dataset.number)
+    );
+    if (pendingDaubOps.has(opKey)) {
+      const desired = pendingDaubOps.get(opKey);
+      if (desired === serverState) {
+        pendingDaubOps.delete(opKey);
+      }
+      setDaubed(cell, desired);
+      return;
+    }
+    setDaubed(cell, serverState);
   });
 }
 
+// Reconciles one card's cells against the backend's authoritative post-mutation state for that
+// card (the `daub_state` ack). A pending op newer than this ack (a click made after the request
+// this ack answers was sent) is left queued rather than overwritten — flushPendingDaubOps will
+// resend it and it will get its own fresh ack.
+function applyDaubAck(cardIndex, numbers) {
+  const cardIndexStr = String(cardIndex);
+  const list = Array.isArray(numbers) ? numbers : [];
+  document
+    .querySelectorAll(`.bingo-cell[data-card="${cardIndexStr}"]`)
+    .forEach((cell) => {
+      if (cell.dataset.number === "free") {
+        return;
+      }
+      const opKey = `${cardIndexStr}:${cell.dataset.number}`;
+      const serverState = list.some(
+        (value) => String(value) === String(cell.dataset.number)
+      );
+      const pending = pendingDaubOps.get(opKey);
+      if (pending === undefined || pending === serverState) {
+        setDaubed(cell, serverState);
+        pendingDaubOps.delete(opKey);
+      }
+    });
+}
+
 function emitDaubUpdate(cell, next) {
-  if (!socket || !socket.connected) {
-    return;
-  }
   if (cell.dataset.number === "free") {
     return;
   }
   const cardIndex = Number(cell.dataset.card);
   if (!Number.isFinite(cardIndex)) {
+    return;
+  }
+  pendingDaubOps.set(`${cardIndex}:${cell.dataset.number}`, next);
+  if (!socket || !socket.connected) {
+    // Queued, not lost — flushPendingDaubOps resends this once the connection (and the
+    // authoritative init_state rebuild) is back.
     return;
   }
   socket.emit("daub_update", {
@@ -641,6 +688,21 @@ function emitDaubUpdate(cell, next) {
     cardIndex,
     number: cell.dataset.number,
     daubed: next,
+  });
+}
+
+// Resends every outstanding local intention after a (re)connect. Called once init_state has
+// already applied the backend's last-known state, so this only ever adds back what the
+// reconnect logic deliberately preserved as still-pending in applyDaubs above.
+function flushPendingDaubOps() {
+  if (!socket || !socket.connected || pendingDaubOps.size === 0) {
+    return;
+  }
+  pendingDaubOps.forEach((daubed, opKey) => {
+    const separatorIndex = opKey.indexOf(":");
+    const cardIndex = Number(opKey.slice(0, separatorIndex));
+    const number = opKey.slice(separatorIndex + 1);
+    socket.emit("daub_update", { roomCode, seed: masterSeed, cardIndex, number, daubed });
   });
 }
 
@@ -893,6 +955,16 @@ function connectSocket(serverUrl) {
     updateBingoButtonState();
   });
 
+  // Additive, backend-acknowledged daub reconciliation (see applyDaubAck above). An older
+  // deployment of this server never sends this event, in which case this listener simply never
+  // fires and behavior is unchanged from before.
+  socket.on("daub_state", (payload) => {
+    if (!payload || payload.seed !== masterSeed) {
+      return;
+    }
+    applyDaubAck(payload.cardIndex, payload.numbers);
+  });
+
   function markCalled(value) {
     const key = String(value);
     calledSet.add(key);
@@ -973,6 +1045,9 @@ function connectSocket(serverUrl) {
       markCalled(String(value));
     });
     updateBingoState();
+    // Replay anything that was clicked while disconnected (or before an ack came back) now that
+    // the authoritative rebuild above has settled — see pendingDaubOps' doc comment.
+    flushPendingDaubOps();
   });
 
   socket.on("room_state", (payload) => {
