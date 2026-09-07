@@ -489,6 +489,73 @@ function normalizeLifecycle(value) {
   return typeof value === "string" && LIFECYCLE_STATES.has(value) ? value : "Legacy";
 }
 
+// --- Bingo caller de-duplication + eligible-caller/split computation (product correction: a player may only call
+// Bingo once per applicable phase; VenueOS payout must be backend-driven, never a manually-typed winner) ---
+
+function getCurrentPhase(session) {
+  return session.progressive && session.progressive.enabled ? session.progressive.currentPhase : null;
+}
+
+// True if `seed` already has an accepted call for the CURRENT applicable phase — checked before pushing a new
+// entry in both the legacy call_bingo handler and the v2 claims handler, so a repeat call from the same
+// participant is a no-op (still answered as success, never an error) rather than a second bingoCalls entry. This
+// means bingoCalls itself is naturally de-duplicated per (seed, phase) going forward; getEligibleCallers below also
+// de-duplicates defensively for any older room whose bingoCalls predate this change.
+function hasAlreadyCalledThisPhase(session, seed, phase) {
+  return Array.isArray(session.bingoCalls) && session.bingoCalls.some((call) => call.seed === seed && call.phase === phase);
+}
+
+// The de-duplicated, chronologically-ordered list of callers eligible for a payout split RIGHT NOW — filtered to
+// the current applicable phase (a progressive game's earlier-phase callers are a different applicable game/phase
+// and must not dilute the current phase's split), first-accepted-call-per-seed wins the displayed timestamp.
+function getEligibleCallers(session) {
+  const currentPhase = getCurrentPhase(session);
+  const seen = new Set();
+  const callers = [];
+  for (const call of Array.isArray(session.bingoCalls) ? session.bingoCalls : []) {
+    if (call.phase !== currentPhase) continue;
+    if (seen.has(call.seed)) continue;
+    seen.add(call.seed);
+    callers.push({ seed: call.seed, name: call.name, timestamp: call.timestamp, phase: call.phase });
+  }
+  return callers;
+}
+
+// Donor's exact phase-aware prize pool (FFXIVBingo4All.Plugin/Plugin.cs GetCurrentPrizePool/
+// GetCurrentPhaseSplitPercent): for a non-progressive game this is just the overall prize pool; for progressive,
+// it's (phaseStartPrizePool - payouts already locked in earlier phases) times the current phase's split percent
+// (phase 1 uses phaseOneSplit directly; phases 2/3 use the *remaining* split percentages, which are already
+// re-normalized to sum to 100 by normalizeProgressiveState).
+function getCurrentPhaseSplitPercent(progressive) {
+  const phase = Math.min(3, Math.max(1, Number(progressive?.currentPhase) || 1));
+  if (phase === 1) return clampPercentage(progressive.phaseOneSplit);
+  if (phase === 2) return clampPercentage(progressive.remainingPhaseTwoSplit);
+  return clampPercentage(progressive.remainingPhaseThreeSplit);
+}
+
+function computeCurrentPrizePool(session) {
+  const pot = computePot(session);
+  if (!isProgressiveGameType(session.gameType) || !session.progressive || !session.progressive.enabled) {
+    return pot.prizePool;
+  }
+  const progressive = session.progressive;
+  const phase = Math.min(3, Math.max(1, Number(progressive.currentPhase) || 1));
+  const lockedBefore =
+    phase === 1 ? 0 :
+    phase === 2 ? Number(progressive.lockedPhaseOnePayout) || 0 :
+    (Number(progressive.lockedPhaseOnePayout) || 0) + (Number(progressive.lockedPhaseTwoPayout) || 0);
+  const remainingPrizePool = Math.max(0, (Number(progressive.phaseStartPrizePool) || 0) - lockedBefore);
+  return Math.round(remainingPrizePool * (getCurrentPhaseSplitPercent(progressive) / 100));
+}
+
+// Donor's exact split semantics (FFXIVBingo4All.Plugin/Plugin.cs GetPrizeSplit: GetCurrentPrizePool() /
+// max(1, bingoCallers.Count)) — plain integer division, remainder gil is not redistributed. Preserved verbatim
+// rather than inventing different rounding behavior.
+function computeSplitAmount(session) {
+  const callers = getEligibleCallers(session);
+  return Math.floor(computeCurrentPrizePool(session) / Math.max(1, callers.length));
+}
+
 function buildAllowedCards(players, allowedCards) {
   const result = {};
   if (players && Object.keys(players).length > 0) {
@@ -1318,6 +1385,13 @@ async function buildRoomSnapshot(roomCode) {
     colors: session.colors,
     pot: computePot(session),
     payouts,
+    // Additive (product correction): the de-duplicated, chronologically-ordered, current-phase-eligible caller
+    // list — the authoritative source VenueOS displays and drives payout obligations from, so the host never
+    // manually picks a winner. currentPrizePool/splitAmount are the donor's exact phase-aware formulas
+    // (computeCurrentPrizePool/computeSplitAmount) — clients display these, they never recompute independently.
+    bingoCallers: getEligibleCallers(session),
+    currentPrizePool: computeCurrentPrizePool(session),
+    splitAmount: computeSplitAmount(session),
   };
 }
 
@@ -1468,9 +1542,14 @@ app.post("/api/v2/rooms/:roomCode/cards", async (req, res) => {
         compCount: Number.isFinite(Number(compCount)) ? Number(compCount) : undefined,
       },
     };
-    session.players = mergePlayers(session.players, incoming);
-    // An explicit v2 grant always carries paidCount/compCount, so mergePlayers already trusted
-    // it directly rather than applying the legacy delta-preservation rule.
+    // BUG FIX (live QA correction pass): mergePlayers's "replace with exactly what's given" semantics are correct
+    // for host-sync, which always receives the FULL players map from the standalone plugin every sync — but this
+    // endpoint receives only ONE seed at a time. Calling mergePlayers(session.players, incoming) directly here
+    // silently discarded every OTHER previously-granted player's record on every single-seed grant (a second
+    // player's card grant would wipe out the first player entirely). The fix: merge the (correctly delta-preserved)
+    // single-seed result INTO the existing players map, never replace the whole map with just this one entry.
+    const mergedSingleSeed = mergePlayers(session.players, incoming);
+    session.players = { ...session.players, ...mergedSingleSeed };
     session.allowedCards = buildAllowedCards(session.players, session.allowedCards);
     touchSession(session);
     await saveRoom(roomCode, roomKey, session);
@@ -1556,6 +1635,73 @@ app.post("/api/v2/rooms/:roomCode/payouts", async (req, res) => {
         status: "open",
       },
     };
+  });
+});
+
+// POST /api/v2/rooms/:roomCode/payouts/sync — product correction: the NORMAL host payout path. The host never
+// manually picks a winner or types a total owed; this creates/updates a payout obligation for every backend-
+// computed eligible Bingo caller (getEligibleCallers) at the backend-computed split amount (computeSplitAmount),
+// and returns the full updated snapshot (same shape as GET /api/v2/rooms/:roomCode). Safe to call repeatedly (e.g.
+// every time the operator panel refreshes).
+//
+// AT MOST ONE obligation is ever auto-created per caller per room. While that obligation is still open with zero
+// confirmed payment, its total_owed is kept in sync with the current split (e.g. a second caller joining changes
+// everyone's share). The INSTANT any payment against it — partial or full — is confirmed, it is frozen permanently:
+// never retroactively shrunk, and never auto-topped-up even if the pot later grows (e.g. a third paid caller
+// joins after the first two are already fully paid). A genuine top-up in that scenario is a deliberate manual
+// action via the existing POST /api/v2/rooms/:roomCode/payouts endpoint, never something this endpoint invents on
+// its own — consistent with this project's "never automatically create additional financial risk" principle. This
+// endpoint intentionally does NOT take winnerSeed/totalOwed from the client — those come entirely from
+// backend-authoritative game state.
+app.post("/api/v2/rooms/:roomCode/payouts/sync", async (req, res) => {
+  const { roomCode } = req.params;
+  const roomKey = getRoomKey(req);
+  if (!roomKey) return res.status(400).json({ error: "roomKey required" });
+
+  return withIdempotency(req, res, "payouts_sync", roomCode, async () => {
+    const session = await loadRoom(roomCode);
+    if (!session || session.roomKey !== roomKey) {
+      return { status: 404, body: { error: "room not found" } };
+    }
+
+    const callers = getEligibleCallers(session);
+    const splitAmount = computeSplitAmount(session);
+    const now = Date.now();
+
+    for (const caller of callers) {
+      if (splitAmount < 1) continue; // nothing to create yet (e.g. pot/prize is still 0) — sync again once it is
+      // BUG FIX (live QA correction pass): the original lookup only checked status='open', so once a caller's
+      // obligation was fully confirmed paid (status auto-transitions to 'paid'), the NEXT sync found "no open
+      // obligation" and created a brand-new duplicate one — silently doubling what that caller appeared to be
+      // owed. The fix: look for ANY existing obligation for this seed in this room (any status), and NEVER
+      // auto-create a second one. At most ONE obligation is ever auto-created per caller per room. It is kept in
+      // sync with the current split ONLY while it is still open with zero confirmed payment; the instant any
+      // payment (partial or full) is confirmed, it is frozen permanently — no automatic top-up if the pot later
+      // grows (e.g. another paid caller joins). A genuine top-up is a deliberate manual action via the existing
+      // POST /api/v2/rooms/:roomCode/payouts admin/recovery endpoint, never something this endpoint invents on its
+      // own — consistent with this project's "never automatically create additional financial risk" principle.
+      const existing = await dbGet(
+        "SELECT * FROM payout_obligations WHERE room_code = ? AND winner_seed = ? ORDER BY created_at DESC LIMIT 1",
+        [roomCode, caller.seed]
+      );
+      if (!existing) {
+        await dbRun(
+          "INSERT INTO payout_obligations (payout_id, room_code, winner_seed, winner_name, total_owed, confirmed_paid, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 'open', ?, ?)",
+          [newId(), roomCode, caller.seed, caller.name, splitAmount, now, now]
+        );
+      } else if (existing.status === "open" && existing.confirmed_paid === 0 && existing.total_owed !== splitAmount) {
+        // Still fully unpaid — safe to keep the owed amount in sync with the current eligible-caller count/pot.
+        await dbRun(
+          "UPDATE payout_obligations SET total_owed = ?, winner_name = ?, updated_at = ? WHERE payout_id = ?",
+          [splitAmount, caller.name, now, existing.payout_id]
+        );
+      }
+      // else: this caller's most recent obligation already has a confirmed (partial or full) payment, or is void —
+      // frozen, never adjusted and never duplicated.
+    }
+
+    const snapshot = await buildRoomSnapshot(roomCode);
+    return { status: 200, body: snapshot };
   });
 });
 
@@ -1718,14 +1864,19 @@ app.post("/api/v2/rooms/:roomCode/claims", async (req, res) => {
   }
 
   const caller = typeof name === "string" && name.trim() ? name.trim().slice(0, 32) : "Unknown";
-  const phase = session.progressive && session.progressive.enabled ? session.progressive.currentPhase : null;
-  session.lastBingo = { name: caller, seed: seed.trim(), phase, timestamp: Date.now() };
+  const phase = getCurrentPhase(session);
   if (!Array.isArray(session.bingoCalls)) session.bingoCalls = [];
-  session.bingoCalls.push({ name: caller, seed: seed.trim(), phase, timestamp: Date.now(), validated: true, cardIndex: index });
-  touchSession(session);
-  await saveRoom(roomCode, session.roomKey, session);
 
-  io.to(roomCode).emit("bingo_called", { roomCode, name: caller, seed: seed.trim(), phase, timestamp: Date.now() });
+  // De-duplication (product correction): a seed that already has an accepted call for this applicable phase is
+  // answered as success (their call IS registered) without creating a second bingoCalls entry or re-broadcasting —
+  // a repeat claim from the same participant is a no-op, never an error and never a duplicate payout candidate.
+  if (!hasAlreadyCalledThisPhase(session, seed.trim(), phase)) {
+    session.lastBingo = { name: caller, seed: seed.trim(), phase, timestamp: Date.now() };
+    session.bingoCalls.push({ name: caller, seed: seed.trim(), phase, timestamp: Date.now(), validated: true, cardIndex: index });
+    touchSession(session);
+    await saveRoom(roomCode, session.roomKey, session);
+    io.to(roomCode).emit("bingo_called", { roomCode, name: caller, seed: seed.trim(), phase, timestamp: Date.now() });
+  }
 
   return res.json({ ok: true, validated: true, pattern: ruleType });
 });
@@ -1841,41 +1992,28 @@ io.on("connection", (socket) => {
       typeof name === "string" && name.trim().length > 0
         ? name.trim().slice(0, 32)
         : "Unknown";
+    const callSeed = typeof seed === "string" ? seed : null;
+    const phase = getCurrentPhase(session);
 
-    session.lastBingo = {
-      name: caller,
-      seed: typeof seed === "string" ? seed : null,
-      phase:
-        session.progressive && session.progressive.enabled
-          ? session.progressive.currentPhase
-          : null,
-      timestamp: Date.now(),
-    };
     if (!Array.isArray(session.bingoCalls)) {
       session.bingoCalls = [];
     }
-    session.bingoCalls.push({
-      name: caller,
-      seed: typeof seed === "string" ? seed : null,
-      phase:
-        session.progressive && session.progressive.enabled
-          ? session.progressive.currentPhase
-          : null,
-      timestamp: Date.now(),
-    });
+
+    // De-duplication (product correction): a repeat call_bingo from a seed that already has an accepted call for
+    // this applicable phase is a no-op — no second bingoCalls entry, no re-broadcast. The legacy standalone plugin
+    // already only ever displays unique caller NAMES (it rebuilds a HashSet<string> from bingoCalls on every poll),
+    // so removing duplicate entries here does not change what it shows — this is a safe, additive tightening, not a
+    // behavior change for existing clients.
+    if (callSeed !== null && hasAlreadyCalledThisPhase(session, callSeed, phase)) {
+      return;
+    }
+
+    session.lastBingo = { name: caller, seed: callSeed, phase, timestamp: Date.now() };
+    session.bingoCalls.push({ name: caller, seed: callSeed, phase, timestamp: Date.now() });
     touchSession(session);
     await saveRoom(roomCode, session.roomKey, session);
 
-    io.to(roomCode).emit("bingo_called", {
-      roomCode,
-      name: caller,
-      seed: typeof seed === "string" ? seed : null,
-      phase:
-        session.progressive && session.progressive.enabled
-          ? session.progressive.currentPhase
-          : null,
-      timestamp: Date.now(),
-    });
+    io.to(roomCode).emit("bingo_called", { roomCode, name: caller, seed: callSeed, phase, timestamp: Date.now() });
   });
 
   socket.on("daub_update", async (payload) => {

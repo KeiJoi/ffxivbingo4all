@@ -12,6 +12,7 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
+const { io } = require("socket.io-client");
 
 const PORT = 39871;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -80,8 +81,12 @@ async function run() {
     child = spawn(process.execPath, ["server.js"], {
       cwd: path.join(__dirname, ".."),
       env: { ...process.env, PORT: String(PORT) },
-      stdio: "ignore",
+      stdio: ["ignore","pipe","pipe"],
     });
+    if (process.env.DEBUG_SERVER_LOG) {
+      child.stdout.on("data", (d) => process.stdout.write(`[server] ${d}`));
+      child.stderr.on("data", (d) => process.stderr.write(`[server:err] ${d}`));
+    }
     await waitForServer(30);
 
     // --- 1) Legacy host-sync creates a "Legacy" room; economics always mutable. ---
@@ -355,6 +360,116 @@ async function run() {
     assert.ok(!("roomKey" in res.body), "the public v2 room-read response must never include the room's key");
     console.log("PASS: host handoff can resume a discovered room by code, and the room key is never exposed in the public snapshot");
 
+    // --- 7) Bingo caller de-duplication + backend-driven payout split (product correction: no manual Winner
+    // dropdown — the host must never type/select a winner or total-owed; the backend computes both). ---
+    res = await request("POST", "/api/v2/rooms", {
+      roomCode: "IT-CALLERS",
+      roomKey: "ck",
+      costPerCard: 10000000,
+      startingPot: 0,
+      prizePercentage: 100,
+      gameType: "Single Line",
+    });
+    assert.strictEqual(res.status, 201);
+    await request("POST", "/api/v2/rooms/IT-CALLERS/cards", { seed: "seedKei", name: "Kei Joi", paidCount: 1, compCount: 0, idempotencyKey: "grant-kei" }, { "x-room-key": "ck" });
+    await request("POST", "/api/v2/rooms/IT-CALLERS/cards", { seed: "seedHai", name: "Hai-Hai", paidCount: 1, compCount: 0, idempotencyKey: "grant-hai" }, { "x-room-key": "ck" });
+    if (process.env.DEBUG_SERVER_LOG) {
+      const preCheck = await request("GET", "/api/v2/rooms/IT-CALLERS");
+      console.log("DEBUG pre-callBingo allowedCards:", JSON.stringify(preCheck.body.allowedCards), "lifecycle:", preCheck.body.lifecycle);
+    }
+
+    // Bounded, poll-based wait instead of a blind fixed delay — the socket event is fire-and-forget server-side,
+    // so a single fixed setTimeout is inherently a race; polling with a generous overall bound is both faster on a
+    // fast machine and safe on a slow one. Throws a clear message (never hangs) if the condition is never met.
+    async function waitFor(checkFn, description, { attempts = 40, intervalMs = 50 } = {}) {
+      let last;
+      for (let i = 0; i < attempts; i += 1) {
+        last = await request("GET", "/api/v2/rooms/IT-CALLERS");
+        if (checkFn(last.body)) return last;
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+      throw new Error(`Timed out waiting for: ${description}. Last snapshot: ${JSON.stringify(last?.body?.bingoCallers)}`);
+    }
+
+    const socket = io(BASE, { transports: ["websocket"] });
+    try {
+      // Bounded connect wait — a connection failure must throw, never hang forever.
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("socket.io connect timed out")), 5000);
+        socket.once("connect", () => { clearTimeout(timer); resolve(); });
+        socket.once("connect_error", (err) => { clearTimeout(timer); reject(err); });
+      });
+
+      const callBingo = (seed, name) => socket.emit("call_bingo", { roomCode: "IT-CALLERS", name, seed });
+
+      callBingo("seedKei", "Kei Joi");
+      res = await waitFor((body) => body.bingoCallers.length === 1, "seedKei's call to be registered");
+      assert.strictEqual(res.body.bingoCallers[0].name, "Kei Joi");
+      assert.strictEqual(res.body.splitAmount, 20000000, "one caller: the whole 20,000,000 prize pool");
+      const firstTimestamp = res.body.bingoCallers[0].timestamp;
+      console.log("PASS: a single Bingo caller is owed the entire prize pool");
+
+      // Duplicate call from the SAME seed must not create a second caller entry or move the timestamp. There's no
+      // "wait for absence" to poll for, so this checks immediately then again after a short settle window.
+      callBingo("seedKei", "Kei Joi");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      res = await request("GET", "/api/v2/rooms/IT-CALLERS");
+      assert.strictEqual(res.body.bingoCallers.length, 1, "a repeat call from the same seed must not create a second caller entry");
+      assert.strictEqual(res.body.bingoCallers[0].timestamp, firstTimestamp, "the FIRST accepted call's timestamp must be preserved, never overwritten by a later duplicate");
+      console.log("PASS: duplicate Bingo calls from the same participant are de-duplicated; first timestamp wins");
+
+      // Sync creates the first obligation from backend state alone (no manual winner/amount ever supplied).
+      res = await request("POST", "/api/v2/rooms/IT-CALLERS/payouts/sync", { idempotencyKey: "sync-1" }, { "x-room-key": "ck" });
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.payouts.length, 1);
+      assert.strictEqual(res.body.payouts[0].winnerSeed, "seedKei");
+      assert.strictEqual(res.body.payouts[0].totalOwed, 20000000);
+      const keiPayoutId = res.body.payouts[0].payoutId;
+      console.log("PASS: payout sync creates an obligation from backend-eligible callers with no client-supplied amount");
+
+      // A second unique caller changes the split — the still-fully-unpaid first obligation must be recomputed.
+      callBingo("seedHai", "Hai-Hai");
+      res = await waitFor((body) => body.bingoCallers.length === 2, "seedHai's call to be registered");
+      assert.strictEqual(res.body.splitAmount, 10000000, "two callers: 20,000,000 / 2");
+
+      res = await request("POST", "/api/v2/rooms/IT-CALLERS/payouts/sync", { idempotencyKey: "sync-2" }, { "x-room-key": "ck" });
+      const kei = res.body.payouts.find((p) => p.winnerSeed === "seedKei");
+      const hai = res.body.payouts.find((p) => p.winnerSeed === "seedHai");
+      assert.strictEqual(kei.totalOwed, 10000000, "Kei's still-unpaid obligation must be recomputed when Hai joins");
+      assert.strictEqual(hai.totalOwed, 10000000);
+      console.log("PASS: a second caller joining recalculates every still-unpaid obligation's owed amount (20,000,000 / 2 = 10,000,000 each)");
+
+      // Confirm a payment on Kei's obligation, THEN a third caller joins — Kei's obligation must now be FROZEN
+      // (never retroactively shrunk after a payment has started), while Hai's (still unpaid) and the new caller's
+      // obligations use the new 3-way split.
+      const attemptRes = await request("POST", `/api/v2/rooms/IT-CALLERS/payouts/${keiPayoutId}/attempts`, { amount: 10000000, idempotencyKey: "attempt-kei-1" }, { "x-room-key": "ck" });
+      await request("PATCH", `/api/v2/rooms/IT-CALLERS/payouts/${keiPayoutId}/attempts/${attemptRes.body.attemptId}`, { status: "confirmed", idempotencyKey: "confirm-kei-1" }, { "x-room-key": "ck" });
+
+      // A COMPLIMENTARY card grant for the third caller — this exercises two rules at once: comp cards never
+      // inflate the pot (it must stay exactly 20,000,000, not grow), while still adding a third eligible caller,
+      // giving a genuinely uneven 3-way split with the donor's exact floor-and-drop-the-remainder behavior
+      // (20,000,000 / 3 = 6,666,666.67 -> 6,666,666, with 2 gil unallocated, never invented/redistributed).
+      await request("POST", "/api/v2/rooms/IT-CALLERS/cards", { seed: "seedThird", name: "Another Player", paidCount: 0, compCount: 1, idempotencyKey: "grant-third" }, { "x-room-key": "ck" });
+      callBingo("seedThird", "Another Player");
+      res = await waitFor((body) => body.bingoCallers.length === 3, "seedThird's call to be registered");
+      assert.strictEqual(res.body.pot.currentPot, 20000000, "a comp card must never inflate the pot, even as a new eligible caller");
+      res = await request("POST", "/api/v2/rooms/IT-CALLERS/payouts/sync", { idempotencyKey: "sync-3" }, { "x-room-key": "ck" });
+      const keiAfter = res.body.payouts.filter((p) => p.winnerSeed === "seedKei");
+      const haiAfter = res.body.payouts.find((p) => p.winnerSeed === "seedHai");
+      const thirdAfter = res.body.payouts.find((p) => p.winnerSeed === "seedThird");
+      assert.strictEqual(keiAfter.length, 1, "syncing again after Kei is already fully paid must NEVER create a second/duplicate obligation for her");
+      assert.strictEqual(keiAfter[0].totalOwed, 10000000, "Kei already has a CONFIRMED payment — totalOwed must stay frozen, never retroactively shrunk or topped up");
+      assert.strictEqual(keiAfter[0].confirmedPaid, 10000000);
+      assert.strictEqual(haiAfter.totalOwed, 6666666, "Hai is still fully unpaid — recomputed to the new 3-way split (20,000,000 / 3, floored)");
+      assert.strictEqual(thirdAfter.totalOwed, 6666666);
+      console.log("PASS: an obligation with a confirmed payment is frozen (never duplicated or topped up); still-unpaid obligations track the current caller count and pot");
+    } finally {
+      // GUARANTEED cleanup regardless of any assertion throwing above — an open socket.io-client connection keeps
+      // Node's event loop alive indefinitely (its own internal timers), which is exactly what turned an earlier
+      // assertion failure in this block into an apparent test-runner hang instead of a clean failure.
+      socket.close();
+    }
+
     console.log("\nAll v2 integration tests passed.");
   } finally {
     if (child) child.kill();
@@ -371,7 +486,19 @@ async function run() {
   }
 }
 
-run().catch((err) => {
-  console.error("FAIL:", err);
-  process.exitCode = 1;
-});
+// Defense-in-depth watchdog: every resource this script opens (child process, socket.io client) is cleaned up in
+// its own try/finally above, but a HARD, unconditional exit here guarantees the process can never hang past this
+// bound for any reason not yet anticipated (e.g. some other unclosed handle). unref() so this timer itself never
+// keeps the process alive once everything else has already exited cleanly.
+const watchdog = setTimeout(() => {
+  console.error("FAIL: test script watchdog fired — something kept the process alive past 60s. Forcing exit.");
+  process.exit(1);
+}, 60000);
+watchdog.unref();
+
+run()
+  .catch((err) => {
+    console.error("FAIL:", err);
+    process.exitCode = 1;
+  })
+  .finally(() => clearTimeout(watchdog));
