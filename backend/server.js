@@ -1247,6 +1247,46 @@ app.post("/api/links", async (req, res) => {
   return res.json({ ok: true, code });
 });
 
+// Additive (live-QA correction — VenueOS reconstruction): short_links previously had no lookup by room/seed, only
+// by exact code, so a client that lost its local cache (plugin reload, resumed room, etc.) had no way to rediscover
+// a player's existing link and had to mint a brand-new code every time — churning the table and handing the host a
+// different URL than whatever they may have already pasted into an FFXIV tell. This does not change POST /api/links
+// or GET /l/:code at all; it only adds a way to ask "does a link already exist for this room+seed" before deciding
+// to create one. Same trust boundary as POST /api/links (Admin Key) since it discloses the same kind of short code.
+app.get("/api/links/lookup", async (req, res) => {
+  if (!isAdminRequest(req)) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+
+  const room = typeof req.query.room === "string" ? req.query.room.trim() : "";
+  const seed = typeof req.query.seed === "string" ? req.query.seed.trim() : "";
+  if (!room || !seed) {
+    return res.status(400).json({ error: "room and seed required" });
+  }
+
+  // payload is opaque JSON TEXT (matching every other short_links access in this file) — filtered in JS rather than
+  // via a SQL JSON function, consistent with the rest of this codebase. Bounded to the most recently created rows
+  // so a long-lived deployment's link history can't turn this into an unbounded full-table scan; the most recent
+  // link for a room+seed is always what a resuming client actually wants.
+  const rows = await dbAll(
+    "SELECT code, payload, created_at FROM short_links ORDER BY created_at DESC LIMIT 2000",
+    []
+  );
+  for (const row of rows) {
+    let payload = null;
+    try {
+      payload = JSON.parse(row.payload);
+    } catch (err) {
+      continue;
+    }
+    if (payload && payload.room === room && payload.seed === seed) {
+      return res.json({ ok: true, code: row.code, count: payload.count });
+    }
+  }
+
+  return res.json({ ok: true, code: null, count: null });
+});
+
 app.get("/l/:code", async (req, res) => {
   const code = String(req.params.code || "").trim().toUpperCase();
   if (!code) {
