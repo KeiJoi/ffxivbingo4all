@@ -71,10 +71,19 @@ function generateCard(seed) {
   return grid;
 }
 
-// Matches the browser client's per-seed-per-card seeding convention (app.js: `${masterSeed}_${index}`).
+// Live-QA correction: this previously special-cased cardIndex 0 to use the BARE masterSeed
+// (`cardIndex > 0 ? masterSeed_cardIndex : masterSeed`), which does NOT match either
+// authoritative implementation. The browser client (app.js's createCard(index), the ONLY thing
+// that actually renders a player's cards) does `const seed = \`${masterSeed}_${index}\`;`
+// UNCONDITIONALLY — no special case for index 0 — and the donor plugin's own
+// GenerateCardGrid(masterSeed, cardIndex) does the identical `$"{masterSeed}_{cardIndex}"` with
+// no special case either. This module's special-cased index 0 therefore generated a DIFFERENT
+// card 1 than what the player's browser actually showed and the player actually daubed — live QA
+// caught this via a direct VenueOS-vs-browser Card 1 comparison (cards 2-16 matched exactly;
+// only card 1/index 0 diverged, which is exactly what this bug predicts). Fixed to match both
+// authoritative sources unconditionally. See backend/test/cardgen.test.js's golden vectors.
 function generateCardForIndex(masterSeed, cardIndex) {
-  const seed = cardIndex > 0 ? `${masterSeed}_${cardIndex}` : masterSeed;
-  return generateCard(seed);
+  return generateCard(`${masterSeed}_${cardIndex}`);
 }
 
 // Shared, ONE authoritative definition of "what cells make up a valid win for this game type"
