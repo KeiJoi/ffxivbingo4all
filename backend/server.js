@@ -556,6 +556,29 @@ function computeSplitAmount(session) {
   return Math.floor(computeCurrentPrizePool(session) / Math.max(1, callers.length));
 }
 
+// Live-QA addition: backend-authoritative "balls to Bingo" — for every seed with at least one
+// allowed card, the fewest additional CALLED numbers (not daubed — see cardgen.ballsToBingoForCard's
+// doc comment) that could complete a valid pattern on ANY of that seed's cards, under the room's
+// current ACTIVE game type. Returns { [seed]: number }. The backend owns this calculation (not a
+// VenueOS-only visual estimate) so every client — VenueOS's roster, a future browser feature, etc.
+// — reads the exact same number computed from the exact same authoritative called-number state.
+function computeBallsToBingo(session) {
+  const ruleType = getRoomRuleGameType(session);
+  const calledSet = new Set(session.calledNumbers);
+  const result = {};
+  for (const seed of Object.keys(session.allowedCards || {})) {
+    const cardCount = Number(session.allowedCards[seed]) || 0;
+    let playerMinimum = null;
+    for (let index = 0; index < cardCount; index += 1) {
+      const grid = cardgen.generateCardForIndex(seed, index);
+      const cardMinimum = cardgen.ballsToBingoForCard(grid, calledSet, ruleType);
+      if (playerMinimum === null || cardMinimum < playerMinimum) playerMinimum = cardMinimum;
+    }
+    if (playerMinimum !== null) result[seed] = playerMinimum;
+  }
+  return result;
+}
+
 function buildAllowedCards(players, allowedCards) {
   const result = {};
   if (players && Object.keys(players).length > 0) {
@@ -1432,6 +1455,8 @@ async function buildRoomSnapshot(roomCode) {
     bingoCallers: getEligibleCallers(session),
     currentPrizePool: computeCurrentPrizePool(session),
     splitAmount: computeSplitAmount(session),
+    // Additive (live-QA correction): { [seed]: number } — see computeBallsToBingo's doc comment.
+    ballsToBingo: computeBallsToBingo(session),
   };
 }
 

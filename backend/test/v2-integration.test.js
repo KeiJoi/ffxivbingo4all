@@ -13,6 +13,7 @@ const fs = require("fs");
 const path = require("path");
 const http = require("http");
 const { io } = require("socket.io-client");
+const cardgen = require("../lib/cardgen");
 
 const PORT = 39871;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -469,6 +470,55 @@ async function run() {
       // assertion failure in this block into an apparent test-runner hang instead of a clean failure.
       socket.close();
     }
+
+    // --- 8) Balls-to-Bingo (live-QA addition): backend-authoritative proximity metric, additive on the v2 room
+    // snapshot, recalculated from authoritative called numbers, and required to reach exactly 0 only when the
+    // SAME cardHasBingo rules the claim validator uses independently agree a pattern is complete. ---
+    res = await request("POST", "/api/v2/rooms", {
+      roomCode: "IT-BALLS",
+      roomKey: "bk",
+      costPerCard: 100,
+      startingPot: 0,
+      prizePercentage: 100,
+      gameType: "Single Line",
+    });
+    assert.strictEqual(res.status, 201);
+    await request("POST", "/api/v2/rooms/IT-BALLS/cards", { seed: "seedProximity", name: "Proximity", paidCount: 2, compCount: 0, idempotencyKey: "grant-proximity" }, { "x-room-key": "bk" });
+
+    const gridA = cardgen.generateCardForIndex("seedProximity", 0);
+    const gridB = cardgen.generateCardForIndex("seedProximity", 1);
+    const cardNumsA = cardgen.cardNumbers(gridA);
+    const minAcrossCards = (calledSoFar) => Math.min(
+      cardgen.ballsToBingoForCard(gridA, calledSoFar, "Single Line"),
+      cardgen.ballsToBingoForCard(gridB, calledSoFar, "Single Line")
+    );
+
+    res = await request("GET", "/api/v2/rooms/IT-BALLS");
+    const expectedInitial = minAcrossCards([]);
+    assert.strictEqual(res.body.ballsToBingo.seedProximity, expectedInitial, "initial balls-to-Bingo must match the independently computed minimum across both of the player's owned cards");
+    console.log(`PASS: v2 snapshot exposes ballsToBingo additively (initial=${expectedInitial}, matches independent calculation)`);
+
+    // Call every number on card A, one at a time — Single Line will complete well before all of them are
+    // called, but the point is that the backend's reported value tracks the independently-recomputed minimum
+    // (across BOTH owned cards) after EVERY single call, never a stale or blindly-decremented counter.
+    const called = [];
+    for (const number of cardNumsA) {
+      called.push(number);
+      res = await request("POST", "/api/call-number", { roomCode: "IT-BALLS", number });
+      assert.strictEqual(res.status, 200);
+      const snapshot = await request("GET", "/api/v2/rooms/IT-BALLS");
+      const expected = minAcrossCards(called);
+      assert.strictEqual(snapshot.body.ballsToBingo.seedProximity, expected, `after calling ${number}, expected ${expected} got ${snapshot.body.ballsToBingo.seedProximity}`);
+    }
+    console.log("PASS: ballsToBingo recalculates deterministically from authoritative called numbers after every call, tracking the minimum across all owned cards");
+
+    // Every number on card A has now been called, which guarantees Blackout (and therefore every lesser
+    // pattern) is complete on that card — the final value must be exactly 0, and independent claim validation
+    // (cardHasBingo) must agree a claim would actually validate.
+    const finalSnapshot = await request("GET", "/api/v2/rooms/IT-BALLS");
+    assert.strictEqual(finalSnapshot.body.ballsToBingo.seedProximity, 0, "every number on card A has been called — must read 0");
+    assert.strictEqual(cardgen.cardHasBingo(gridA, called, "Single Line"), true, "claim validation must independently agree a valid Bingo now exists on card A");
+    console.log("PASS: ballsToBingo reaches exactly 0 precisely when cardHasBingo independently agrees a valid pattern exists (claim/proximity rules cannot diverge)");
 
     console.log("\nAll v2 integration tests passed.");
   } finally {

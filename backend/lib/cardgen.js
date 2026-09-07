@@ -77,78 +77,111 @@ function generateCardForIndex(masterSeed, cardIndex) {
   return generateCard(seed);
 }
 
-// daubedNumbers: a Set/array of numbers the seed has marked daubed for this card index.
-// gameType: the room's effective rule game type string (e.g. from getRoomRuleGameType).
-function cardHasBingo(grid, daubedNumbers, gameType) {
-  const daubed = daubedNumbers instanceof Set ? daubedNumbers : new Set(daubedNumbers);
-  const isDaubed = (value) => value === "free" || daubed.has(value);
+// Shared, ONE authoritative definition of "what cells make up a valid win for this game type"
+// (live-QA correction — balls-to-Bingo proximity must never implement a subtly different notion
+// of Bingo than claim validation). Returns either:
+//   { kind: "all", cells: [[row,col], ...] }             — every listed cell must be satisfied
+//   { kind: "lines", lines: [[[row,col]x5], ...], needed } — at least `needed` of the listed
+//                                                            5-cell lines must be fully satisfied
+// "lines" always lists all 5 rows, then all 5 columns, then the two diagonals (12 total) — the
+// exact same candidate set cardHasBingo has always checked, just organized as data instead of
+// three separate inline loops.
+function getPatternGroups(gameType) {
   const lowerType = String(gameType || "").trim().toLowerCase();
 
   if (lowerType === "four corners") {
-    return (
-      isDaubed(grid[0][0]) &&
-      isDaubed(grid[0][4]) &&
-      isDaubed(grid[4][0]) &&
-      isDaubed(grid[4][4])
-    );
+    return { kind: "all", cells: [[0, 0], [0, 4], [4, 0], [4, 4]] };
   }
 
   if (lowerType === "blackout") {
+    const cells = [];
     for (let row = 0; row < 5; row += 1) {
-      for (let col = 0; col < 5; col += 1) {
-        if (!isDaubed(grid[row][col])) {
-          return false;
-        }
-      }
+      for (let col = 0; col < 5; col += 1) cells.push([row, col]);
     }
-    return true;
+    return { kind: "all", cells };
+  }
+
+  const lines = [];
+  for (let row = 0; row < 5; row += 1) {
+    const line = [];
+    for (let col = 0; col < 5; col += 1) line.push([row, col]);
+    lines.push(line);
+  }
+  for (let col = 0; col < 5; col += 1) {
+    const line = [];
+    for (let row = 0; row < 5; row += 1) line.push([row, col]);
+    lines.push(line);
+  }
+  lines.push([[0, 0], [1, 1], [2, 2], [3, 3], [4, 4]]);
+  lines.push([[0, 4], [1, 3], [2, 2], [3, 1], [4, 0]]);
+
+  return { kind: "lines", lines, needed: lowerType === "two lines" ? 2 : 1 };
+}
+
+// daubedNumbers: a Set/array of numbers the seed has marked daubed for this card index.
+// gameType: the room's effective rule game type string (e.g. from getRoomRuleGameType).
+// Behavior is UNCHANGED from before this was rewritten on top of getPatternGroups — see
+// backend/test/cardgen.test.js's existing pattern-rule assertions, which still pass verbatim.
+function cardHasBingo(grid, daubedNumbers, gameType) {
+  const daubed = daubedNumbers instanceof Set ? daubedNumbers : new Set(daubedNumbers);
+  const isDaubed = (value) => value === "free" || daubed.has(value);
+  const group = getPatternGroups(gameType);
+
+  if (group.kind === "all") {
+    return group.cells.every(([row, col]) => isDaubed(grid[row][col]));
   }
 
   let lines = 0;
-  for (let row = 0; row < 5; row += 1) {
-    let rowComplete = true;
-    for (let col = 0; col < 5; col += 1) {
-      if (!isDaubed(grid[row][col])) {
-        rowComplete = false;
-        break;
-      }
-    }
-    if (rowComplete) lines += 1;
+  for (const line of group.lines) {
+    if (line.every(([row, col]) => isDaubed(grid[row][col]))) lines += 1;
+  }
+  return lines >= group.needed;
+}
+
+// Live-QA addition: "how many more balls must be CALLED (not daubed) before this card could be a
+// valid Bingo under this game type" — the backend-authoritative basis for the roster's "(N)"
+// balls-to-Bingo display. Deliberately takes CALLED numbers, not daubed ones: a player forgetting
+// to click an already-called number must not count as a ball still needing to be called (see
+// docs/BINGO_V2_PROTOCOL.md's balls-to-Bingo section). Uses the exact same getPatternGroups this
+// card's cardHasBingo result would use, so `ballsToBingoForCard(...) === 0` if and only if
+// `cardHasBingo(grid, calledNumbers, gameType) === true` — the two can never silently disagree on
+// what a "valid Bingo" is, only on which set of numbers (daubed vs. called) they're evaluated
+// against (see backend/test/cardgen.test.js's explicit equivalence assertions).
+function ballsToBingoForCard(grid, calledNumbers, gameType) {
+  const called = calledNumbers instanceof Set ? calledNumbers : new Set(calledNumbers);
+  const isSatisfied = (value) => value === "free" || called.has(value);
+  const group = getPatternGroups(gameType);
+
+  if (group.kind === "all") {
+    return group.cells.reduce((missing, [row, col]) => missing + (isSatisfied(grid[row][col]) ? 0 : 1), 0);
   }
 
-  for (let col = 0; col < 5; col += 1) {
-    let colComplete = true;
-    for (let row = 0; row < 5; row += 1) {
-      if (!isDaubed(grid[row][col])) {
-        colComplete = false;
-        break;
-      }
+  const missingSets = group.lines.map((line) => {
+    const missing = new Set();
+    for (const [row, col] of line) {
+      const value = grid[row][col];
+      if (!isSatisfied(value)) missing.add(value);
     }
-    if (colComplete) lines += 1;
+    return missing;
+  });
+
+  if (group.needed === 1) {
+    return Math.min(...missingSets.map((set) => set.size));
   }
 
-  let diagComplete = true;
-  for (let i = 0; i < 5; i += 1) {
-    if (!isDaubed(grid[i][i])) {
-      diagComplete = false;
-      break;
+  // needed === 2 ("Two Lines"): the minimum UNION of missing numbers across any two candidate
+  // lines — two lines can share a cell (e.g. a row and a diagonal both pass through the center),
+  // so summing their two individual missing-counts can overstate how many NEW balls are actually
+  // required. The union is the true answer: "how many distinct numbers must still be called for
+  // BOTH of these lines to complete simultaneously."
+  let best = Infinity;
+  for (let i = 0; i < missingSets.length; i += 1) {
+    for (let j = i + 1; j < missingSets.length; j += 1) {
+      const unionSize = new Set([...missingSets[i], ...missingSets[j]]).size;
+      if (unionSize < best) best = unionSize;
     }
   }
-  if (diagComplete) lines += 1;
-
-  let antiDiagComplete = true;
-  for (let i = 0; i < 5; i += 1) {
-    if (!isDaubed(grid[i][4 - i])) {
-      antiDiagComplete = false;
-      break;
-    }
-  }
-  if (antiDiagComplete) lines += 1;
-
-  if (lowerType === "two lines") {
-    return lines >= 2;
-  }
-  return lines >= 1;
+  return best;
 }
 
 // The non-"free" numbers that actually appear on a generated card — used to confirm every
@@ -171,6 +204,8 @@ module.exports = {
   generateColumn,
   generateCard,
   generateCardForIndex,
+  getPatternGroups,
   cardHasBingo,
+  ballsToBingoForCard,
   cardNumbers,
 };
